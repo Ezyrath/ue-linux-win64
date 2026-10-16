@@ -1,0 +1,567 @@
+--- a/Engine/Config/Windows/DataDrivenPlatformInfo.ini
++++ b/Engine/Config/Windows/DataDrivenPlatformInfo.ini
+@@ -24,7 +24,7 @@
+ TutorialPath=SharingAndReleasing
+ Windows:bIsEnabled=true
+ Mac:bIsEnabled=false
+-Linux:bIsEnabled=false
++Linux:bIsEnabled=true
+ BinariesDirectoryName=Win64
+ bUsesHostCompiler=true
+ bUATClosesAfterLaunch=false
+--- a/Engine/Source/Programs/UnrealBuildTool/Platform/Windows/UEBuildWindows.cs
++++ b/Engine/Source/Programs/UnrealBuildTool/Platform/Windows/UEBuildWindows.cs
+@@ -1294,7 +1294,6 @@
+ 		/// </summary>
+ 		/// <param name="Target">Stanard target object</param>
+ 		/// <returns></returns>
+-		[SupportedOSPlatform("windows")]
+ 		protected virtual VCEnvironment CreateVCEnvironment(TargetRules Target)
+ 		{
+ 			return VCEnvironment.Create(Target.WindowsPlatform.Compiler, Target.WindowsPlatform.ToolChain, Platform, Target.WindowsPlatform.Architecture, Target.WindowsPlatform.CompilerVersion, Target.WindowsPlatform.ToolchainVersion, Target.WindowsPlatform.WindowsSdkVersion, null, Target.WindowsPlatform.bUseCPPWinRT, Target.WindowsPlatform.bAllowClangLinker, Target.WindowsPlatform.bAllowRadLinker, Logger);
+@@ -1307,6 +1306,15 @@
+ 		{
+ 			base.ValidateTarget(Target);
+ 
++			if (!OperatingSystem.IsWindows())
++			{
++				if (Target.WindowsPlatform.Compiler == WindowsCompiler.Default || Target.WindowsPlatform.Compiler.IsMSVC())
++				{
++					Target.WindowsPlatform.Compiler = WindowsCompiler.Clang;
++				}
++				Target.WindowsPlatform.bAllowClangLinker = true;
++			}
++
+ 			if (Platform == UnrealTargetPlatform.Win64)
+ 			{
+ 				Target.WindowsPlatform.Architecture = Target.Architecture;
+@@ -1477,7 +1485,7 @@
+ 
+ 			Target.bCompileISPC = true;
+ 
+-			if (OperatingSystem.IsWindows())
++			if (OperatingSystem.IsWindows() || MicrosoftPlatformSDK.HasCompiler(Target.WindowsPlatform.Compiler, Target.WindowsPlatform.Architecture, Logger))
+ 			{
+ 				// Initialize the VC environment for the target, and set all the version numbers to the concrete values we chose
+ 				Target.WindowsPlatform.Environment = CreateVCEnvironment(Target);
+@@ -1790,7 +1798,6 @@
+ 			return arch.ToString();
+ 		}
+ 
+-		[SupportedOSPlatform("windows")]
+ 		public static bool TryGetWindowsSdkDir(string? DesiredVersion, ILogger Logger, [NotNullWhen(true)] out VersionNumber? OutSdkVersion, [NotNullWhen(true)] out DirectoryReference? OutSdkDir)
+ 		{
+ 			return MicrosoftPlatformSDK.TryGetWindowsSdkDir(DesiredVersion, Logger, out OutSdkVersion, out OutSdkDir);
+@@ -1907,6 +1914,35 @@
+ 		/// <param name="Target">The target being build</param>
+ 		public override void ModifyModuleRulesForOtherPlatform(string ModuleName, ModuleRules Rules, ReadOnlyTargetRules Target)
+ 		{
++			if (Target.Platform == UnrealTargetPlatform.Linux)
++			{
++				bool bBuildShaderFormats = Target.bForceBuildShaderFormats;
++
++				if (!Target.bBuildRequiresCookedData)
++				{
++					if (ModuleName == "TargetPlatform")
++					{
++						if (Target.bBuildDeveloperTools || Target.bForceBuildTargetPlatforms)
++						{
++							Rules.DynamicallyLoadedModuleNames.Add("WindowsTargetPlatformSettings");
++							Rules.DynamicallyLoadedModuleNames.Add("WindowsTargetPlatformControls");
++							Rules.DynamicallyLoadedModuleNames.Add("WindowsTargetPlatform");
++						}
++
++						if (Target.bBuildDeveloperTools)
++						{
++							bBuildShaderFormats = true;
++						}
++					}
++				}
++
++				if (ModuleName == "TargetPlatform" && bBuildShaderFormats)
++				{
++					Rules.DynamicallyLoadedModuleNames.Add("ShaderFormatOpenGL");
++					Rules.DynamicallyLoadedModuleNames.Add("ShaderFormatVectorVM");
++					Rules.DynamicallyLoadedModuleNames.Add("VulkanShaderFormat");
++				}
++			}
+ 		}
+ 
+ 		/// <summary>
+@@ -2088,7 +2124,7 @@
+ 			LinkEnvironment.SystemLibraries.Add("ws2_32.lib");
+ 			LinkEnvironment.SystemLibraries.Add("dbghelp.lib");
+ 			LinkEnvironment.SystemLibraries.Add("comctl32.lib");
+-			LinkEnvironment.SystemLibraries.Add("Winmm.lib");
++			LinkEnvironment.SystemLibraries.Add("winmm.lib");
+ 			LinkEnvironment.SystemLibraries.Add("kernel32.lib");
+ 			LinkEnvironment.SystemLibraries.Add("user32.lib");
+ 			LinkEnvironment.SystemLibraries.Add("gdi32.lib");
+--- a/Engine/Source/Programs/UnrealBuildTool/Platform/Windows/MicrosoftPlatformSDK.cs
++++ b/Engine/Source/Programs/UnrealBuildTool/Platform/Windows/MicrosoftPlatformSDK.cs
+@@ -32,14 +32,8 @@
+ 		{
+ 		}
+ 
+-		[SupportedOSPlatform("windows")]
+ 		protected override string? GetInstalledSDKVersion()
+ 		{
+-			if (!OperatingSystem.IsWindows())
+-			{
+-				return null;
+-			}
+-
+ 			// use the PreferredWindowsSdkVersions array to find the SDK version that UBT will use to build with - 
+ 			VersionNumber? WindowsVersion;
+ 			if (TryGetWindowsSdkDir(null, Logger, out WindowsVersion, out _))
+@@ -51,6 +45,30 @@
+ 			return null;
+ 		}
+ 
++		internal static DirectoryReference? GetLinuxWin64SysrootDir()
++		{
++			string? EnvSysroot = Environment.GetEnvironmentVariable("UE_WIN64_SYSROOT");
++			if (!String.IsNullOrEmpty(EnvSysroot))
++			{
++				DirectoryReference Dir = new DirectoryReference(EnvSysroot);
++				if (DirectoryReference.Exists(Dir))
++				{
++					return Dir;
++				}
++			}
++
++			string HomeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
++			if (!String.IsNullOrEmpty(HomeDir))
++			{
++				DirectoryReference DefaultDir = DirectoryReference.Combine(new DirectoryReference(HomeDir), ".local", "share", "ue-linux-win64", "sysroot");
++				if (DirectoryReference.Exists(DefaultDir))
++				{
++					return DefaultDir;
++				}
++			}
++			return null;
++		}
++
+ 		public override bool TryConvertVersionToInt(string? StringValue, out ulong OutValue, string? Hint)
+ 		{
+ 			OutValue = 0;
+@@ -126,7 +144,6 @@
+ 		/// </summary>
+ 		/// <param name="Logger">Logger for output</param>
+ 		/// <returns>Map of version number to Windows SDK directories</returns>
+-		[SupportedOSPlatform("windows")]
+ 		public static IReadOnlyDictionary<VersionNumber, DirectoryReference> FindWindowsSdkDirs(ILogger Logger)
+ 		{
+ 			// Update the cache of install directories, if it's not set
+@@ -141,7 +158,6 @@
+ 		/// List all the installed Windows SDK versions
+ 		/// </summary>
+ 		/// <param name="Logger">Logger for output</param>
+-		[SupportedOSPlatform("windows")]
+ 		public static void DumpWindowsSdkDirs(ILogger Logger)
+ 		{
+ 			IOrderedEnumerable<KeyValuePair<VersionNumber, DirectoryReference>> SortedSdkDirs = FindWindowsSdkDirs(Logger).OrderByDescending(x => x.Key);
+@@ -165,7 +181,6 @@
+ 		/// </summary>
+ 		/// <param name="Logger">Logger for output</param>
+ 		/// <returns>Map of version number to universal CRT directories</returns>
+-		[SupportedOSPlatform("windows")]
+ 		public static IReadOnlyDictionary<VersionNumber, DirectoryReference> FindUniversalCrtDirs(ILogger Logger)
+ 		{
+ 			if (CachedUniversalCrtDirs == null)
+@@ -185,7 +200,6 @@
+ 		/// <param name="MinVersion">Optional minimum required version. Ignored if DesiredVesrion is specified</param>
+ 		/// <param name="MaxVersion">Optional maximum required version. Ignored if DesiredVesrion is specified</param>
+ 		/// <returns>True if the toolchain directory was found correctly</returns>
+-		[SupportedOSPlatform("windows")]
+ 		public static bool TryGetWindowsSdkDir(string? DesiredVersion, ILogger Logger, [NotNullWhen(true)] out VersionNumber? OutSdkVersion, [NotNullWhen(true)] out DirectoryReference? OutSdkDir, VersionNumber? MinVersion = null, VersionNumber? MaxVersion = null)
+ 		{
+ 			// Get a map of Windows SDK versions to their root directories
+@@ -248,7 +262,6 @@
+ 		/// <summary>
+ 		/// Updates the CachedWindowsSdkDirs and CachedUniversalCrtDirs variables
+ 		/// </summary>
+-		[SupportedOSPlatform("windows")]
+ 		private static void UpdateCachedWindowsSdks(ILogger Logger)
+ 		{
+ 			Dictionary<VersionNumber, DirectoryReference> WindowsSdkDirs = new Dictionary<VersionNumber, DirectoryReference>();
+@@ -256,7 +269,7 @@
+ 
+ 			// Enumerate the Windows 8.1 SDK, if present
+ 			DirectoryReference? InstallDir_8_1;
+-			if (TryReadInstallDirRegistryKey32("Microsoft\\Microsoft SDKs\\Windows\\v8.1", "InstallationFolder", out InstallDir_8_1))
++			if (OperatingSystem.IsWindows() && TryReadInstallDirRegistryKey32("Microsoft\\Microsoft SDKs\\Windows\\v8.1", "InstallationFolder", out InstallDir_8_1))
+ 			{
+ 				if (FileReference.Exists(FileReference.Combine(InstallDir_8_1, "Include", "um", "windows.h")))
+ 				{
+@@ -305,19 +318,34 @@
+ 		/// </summary>
+ 		/// <param name="RootDirs">Receives all the Windows 10 sdk root directories</param>
+ 		/// <param name="Logger">Logger for output</param>
+-		[SupportedOSPlatform("windows")]
+ 		public static void EnumerateSdkRootDirs(List<DirectoryReference> RootDirs, ILogger Logger)
+ 		{
+ 			DirectoryReference? RootDir;
+-			if (TryReadInstallDirRegistryKey32("Microsoft\\Windows Kits\\Installed Roots", "KitsRoot10", out RootDir))
++			if (OperatingSystem.IsWindows())
+ 			{
+-				Logger.LogDebug("Found Windows 10 SDK root at {RootDir} (1)", RootDir);
+-				RootDirs.Add(RootDir);
++				if (TryReadInstallDirRegistryKey32("Microsoft\\Windows Kits\\Installed Roots", "KitsRoot10", out RootDir))
++				{
++					Logger.LogDebug("Found Windows 10 SDK root at {RootDir} (1)", RootDir);
++					RootDirs.Add(RootDir);
++				}
++				if (TryReadInstallDirRegistryKey32("Microsoft\\Microsoft SDKs\\Windows\\v10.0", "InstallationFolder", out RootDir))
++				{
++					Logger.LogDebug("Found Windows 10 SDK root at {RootDir} (2)", RootDir);
++					RootDirs.Add(RootDir);
++				}
+ 			}
+-			if (TryReadInstallDirRegistryKey32("Microsoft\\Microsoft SDKs\\Windows\\v10.0", "InstallationFolder", out RootDir))
++			else
+ 			{
+-				Logger.LogDebug("Found Windows 10 SDK root at {RootDir} (2)", RootDir);
+-				RootDirs.Add(RootDir);
++				DirectoryReference? SysrootDir = GetLinuxWin64SysrootDir();
++				if (SysrootDir != null)
++				{
++					DirectoryReference LinuxKitsDir = DirectoryReference.Combine(SysrootDir, "Windows Kits", "10");
++					if (DirectoryReference.Exists(DirectoryReference.Combine(LinuxKitsDir, "Include")))
++					{
++						Logger.LogDebug("Found Windows 10 SDK root in Linux sysroot at {LinuxKitsDir}", LinuxKitsDir);
++						RootDirs.Add(LinuxKitsDir);
++					}
++				}
+ 			}
+ 
+ 			DirectoryReference? HostAutoSdkDir;
+@@ -949,6 +977,58 @@
+ 						}
+ 					}
+ 				}
++				else if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Linux)
++				{
++					DirectoryReference? SysrootDir = GetLinuxWin64SysrootDir();
++					if (Compiler == WindowsCompiler.Clang)
++					{
++						string? LlvmPath = Environment.GetEnvironmentVariable("LLVM_PATH");
++						if (!String.IsNullOrEmpty(LlvmPath))
++						{
++							AddClangToolChain(Compiler, new DirectoryReference(LlvmPath), ToolChains, IsAutoSdk: false, Logger);
++						}
++
++						if (SysrootDir != null)
++						{
++							DirectoryReference SysrootLlvmDir = DirectoryReference.Combine(SysrootDir, "LLVM");
++							if (DirectoryReference.Exists(SysrootLlvmDir))
++							{
++								AddClangToolChain(Compiler, SysrootLlvmDir, ToolChains, IsAutoSdk: false, Logger);
++								foreach (DirectoryReference SubDir in DirectoryReference.EnumerateDirectories(SysrootLlvmDir))
++								{
++									AddClangToolChain(Compiler, SubDir, ToolChains, IsAutoSdk: false, Logger);
++								}
++							}
++						}
++
++						DirectoryReference BundledSdkRoot = DirectoryReference.Combine(Unreal.EngineDirectory, "Extras", "ThirdPartyNotUE", "SDKs", "HostLinux", "Linux_x64");
++						if (DirectoryReference.Exists(BundledSdkRoot))
++						{
++							foreach (DirectoryReference SdkSubDir in DirectoryReference.EnumerateDirectories(BundledSdkRoot))
++							{
++								DirectoryReference HostGnuDir = DirectoryReference.Combine(SdkSubDir, "x86_64-unknown-linux-gnu");
++								if (DirectoryReference.Exists(HostGnuDir))
++								{
++									AddClangToolChain(Compiler, HostGnuDir, ToolChains, IsAutoSdk: true, Logger);
++								}
++							}
++						}
++					}
++					else if (Compiler.IsMSVC())
++					{
++						if (SysrootDir != null)
++						{
++							DirectoryReference ToolChainBaseDir = DirectoryReference.Combine(SysrootDir, "VC", "Tools", "MSVC");
++							DirectoryReference RedistBaseDir = DirectoryReference.Combine(SysrootDir, "VC", "Redist", "MSVC");
++							FindVisualStudioToolChains(ToolChainBaseDir, RedistBaseDir, WindowsCompilerChannel.Latest, ToolChains, IsAutoSdk: false, Logger);
++						}
++
++						if (Compiler == WindowsCompiler.VisualStudio2026)
++						{
++							ToolChains.AddRange(FindToolChainInstallations(WindowsCompiler.VisualStudio2022, Logger));
++						}
++					}
++				}
+ 				return ToolChains;
+ 			});
+ 		}
+@@ -1193,7 +1273,33 @@
+ 			{
+ 				FileVersionInfo VersionInfo = FileVersionInfo.GetVersionInfo(CompilerFile.FullName);
+ 				VersionNumber Version = new VersionNumber(VersionInfo.FileMajorPart, VersionInfo.FileMinorPart, VersionInfo.FileBuildPart);
+-				VersionNumber Family = new VersionNumber(VersionInfo.FileMajorPart);
++				if (Version == new VersionNumber(0, 0, 0) && BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Win64)
++				{
++					if (!VersionNumber.TryParse(ToolChainDir.GetDirectoryName(), out VersionNumber? ParsedVer))
++					{
++						Match VerMatch = Regex.Match(ToolChainDir.FullName, @"clang-(\d+\.\d+\.\d+)");
++						if (!VerMatch.Success || !VersionNumber.TryParse(VerMatch.Groups[1].Value, out ParsedVer))
++						{
++							DirectoryReference ClangLibRoot = DirectoryReference.Combine(ToolChainDir, "lib", "clang");
++							if (DirectoryReference.Exists(ClangLibRoot))
++							{
++								foreach (DirectoryReference VerDir in DirectoryReference.EnumerateDirectories(ClangLibRoot))
++								{
++									if (VersionNumber.TryParse(VerDir.GetDirectoryName(), out ParsedVer))
++									{
++										if (ParsedVer.Components.Count == 1)
++										{
++											ParsedVer = new VersionNumber(ParsedVer.GetComponent(0), 1, 8);
++										}
++										break;
++									}
++								}
++							}
++						}
++					}
++					Version = ParsedVer ?? new VersionNumber(20, 1, 8);
++				}
++				VersionNumber Family = new VersionNumber(Version.GetComponent(0));
+ 
+ 				int Rank = PreferredClangVersions.TakeWhile(x => !x.Contains(Version)).Count();
+ 
+@@ -1342,6 +1448,19 @@
+ 				{
+ 					return false;
+ 				}
++				if (Header[0] == 0x7F && Header[1] == (byte)'E' && Header[2] == (byte)'L' && Header[3] == (byte)'F')
++				{
++					ushort ElfMachine = BinaryPrimitives.ReadUInt16LittleEndian(Header.AsSpan(18));
++					if (MachineType == 0x8664 && ElfMachine == 0x3E)
++					{
++						return true;
++					}
++					if (MachineType == 0xaa64 && ElfMachine == 0xB7)
++					{
++						return true;
++					}
++					return false;
++				}
+ 				if (Header[0] != (byte)'M' || Header[1] != (byte)'Z')
+ 				{
+ 					return false;
+--- a/Engine/Source/Programs/UnrealBuildTool/Platform/Windows/VCEnvironment.cs
++++ b/Engine/Source/Programs/UnrealBuildTool/Platform/Windows/VCEnvironment.cs
+@@ -126,7 +126,6 @@
+ 		/// </summary>
+ 		/// <param name="Params">Main constructor parameters</param>
+ 		/// <param name="Logger">Logger for output</param>
+-		[SupportedOSPlatform("windows")]
+ 		public VCEnvironment(VCEnvironmentParameters Params, ILogger Logger)
+ 		{
+ 			Compiler = Params.Compiler;
+@@ -275,6 +274,10 @@
+ 		{
+ 			if (bAllowClangLinker && Compiler.IsClang())
+ 			{
++				if (!OperatingSystem.IsWindows())
++				{
++					return FileReference.Combine(Unreal.EngineDirectory, "Binaries", "Linux", "UnrealBuildAccelerator", "UbaObjTool");
++				}
+ 				// Since obj files could be LLVM IR Stream file format (when building with ltcg) we can't use link.exe. UbaObjTool support all formats and produce identical lib files as link.exe when running non-ltcg
+ #pragma warning disable CA1308 // Normalize strings to uppercase - the directory names are lowercased in VCS
+ 				DirectoryReference Dir = DirectoryReference.Combine(Unreal.EngineDirectory, "Binaries", "Win64", "UnrealBuildAccelerator", RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant());
+@@ -349,7 +352,6 @@
+ 		/// <summary>
+ 		/// Sets up the standard compile environment for the toolchain
+ 		/// </summary>
+-		[SupportedOSPlatform("windows")]
+ 		private void SetupEnvironment(ILogger Logger)
+ 		{
+ 			string ArchFolder = Architecture.WindowsSystemLibDir;
+@@ -436,7 +438,6 @@
+ 		/// <param name="bAllowRadLinker">Allow use of Rad linker</param>
+ 		/// <param name="Logger">Logger for output</param>
+ 		/// <returns>New environment object with paths for the given settings</returns>
+-		[SupportedOSPlatform("windows")]
+ 		public static VCEnvironment Create(WindowsCompiler Compiler, WindowsCompiler ToolChain, UnrealTargetPlatform Platform, UnrealArch Architecture, string? CompilerVersion, string? ToolchainVersion, string? WindowsSdkVersion, string? SuppliedSdkDirectoryForVersion, bool bUseCPPWinRT, bool bAllowClangLinker, bool bAllowRadLinker, ILogger Logger)
+ 		{
+ 			return Create(new VCEnvironmentParameters(Compiler, ToolChain, Platform, Architecture, CompilerVersion, ToolchainVersion, WindowsSdkVersion, SuppliedSdkDirectoryForVersion, bUseCPPWinRT, bAllowClangLinker, bAllowRadLinker, Logger), Logger);
+@@ -445,7 +446,6 @@
+ 		/// <summary>
+ 		/// Creates an environment with the given parameters
+ 		/// </summary>
+-		[SupportedOSPlatform("windows")]
+ 		public static VCEnvironment Create(VCEnvironmentParameters Params, ILogger Logger)
+ 		{
+ 			return new VCEnvironment(Params, Logger);
+@@ -515,7 +515,6 @@
+ 		/// <param name="bAllowRadLinker">Allow use of Rad linker</param>
+ 		/// <param name="Logger">Logger for output</param>
+ 		/// <returns>Creation parameters for VC environment</returns>
+-		[SupportedOSPlatform("windows")]
+ 		public VCEnvironmentParameters(WindowsCompiler Compiler, WindowsCompiler ToolChain, UnrealTargetPlatform Platform, UnrealArch Architecture, string? CompilerVersion, string? ToolchainVersion, string? WindowsSdkVersion, string? SuppliedSdkDirectoryForVersion, bool bUseCPPWinRT, bool bAllowClangLinker, bool bAllowRadLinker, ILogger Logger)
+ 		{
+ 			// Get the compiler version info
+--- a/Engine/Source/Programs/UnrealBuildTool/Platform/Windows/VCToolChain.cs
++++ b/Engine/Source/Programs/UnrealBuildTool/Platform/Windows/VCToolChain.cs
+@@ -2970,7 +2970,12 @@
+ 					CompileAction.PrerequisiteItems.Add(IconFile);
+ 
+ 					// Setup the compile environment, setting the icon to use via a macro. This is used in Default.rc2.
+-					AddDefinition(Arguments, $"BUILD_ICON_FILE_NAME=\"\\\"{NormalizeCommandLinePath(IconFile, RootPaths).Replace("/", "\\\\", StringComparison.Ordinal)}\\\"\"");
++					string IconPath = NormalizeCommandLinePath(IconFile, RootPaths);
++					if (OperatingSystem.IsWindows())
++					{
++						IconPath = IconPath.Replace("/", "\\\\", StringComparison.Ordinal);
++					}
++					AddDefinition(Arguments, $"BUILD_ICON_FILE_NAME=\"\\\"{IconPath}\\\"\"");
+ 				}
+ 
+ 				// Apply the target settings for the resources
+--- a/Engine/Source/Developer/Windows/WindowsTargetPlatformSettings/Public/GenericWindowsTargetPlatformSettings.h
++++ b/Engine/Source/Developer/Windows/WindowsTargetPlatformSettings/Public/GenericWindowsTargetPlatformSettings.h
+@@ -118,21 +118,24 @@
+ 		// no shaders needed for dedicated server target
+ 		if (!TProperties::IsServerOnly())
+ 		{
++#if PLATFORM_WINDOWS
+ 			static FName NAME_PCD3D_SM6(TEXT("PCD3D_SM6"));
+ 			static FName NAME_PCD3D_SM5(TEXT("PCD3D_SM5"));
++			static FName NAME_PCD3D_ES3_1(TEXT("PCD3D_ES31"));
++
++			OutFormats.AddUnique(NAME_PCD3D_SM5);
++			OutFormats.AddUnique(NAME_PCD3D_SM6);
++			OutFormats.AddUnique(NAME_PCD3D_ES3_1);
++#endif
+ 			static FName NAME_VULKAN_ES31(TEXT("SF_VULKAN_ES31"));
+ 			static FName NAME_OPENGL_150_ES3_1(TEXT("GLSL_150_ES31"));
+ 			static FName NAME_VULKAN_SM5(TEXT("SF_VULKAN_SM5"));
+ 			static FName NAME_VULKAN_SM6(TEXT("SF_VULKAN_SM6"));
+-			static FName NAME_PCD3D_ES3_1(TEXT("PCD3D_ES31"));
+ 
+-			OutFormats.AddUnique(NAME_PCD3D_SM5);
+-			OutFormats.AddUnique(NAME_PCD3D_SM6);
+ 			OutFormats.AddUnique(NAME_VULKAN_ES31);
+ 			OutFormats.AddUnique(NAME_OPENGL_150_ES3_1);
+ 			OutFormats.AddUnique(NAME_VULKAN_SM5);
+ 			OutFormats.AddUnique(NAME_VULKAN_SM6);
+-			OutFormats.AddUnique(NAME_PCD3D_ES3_1);
+ 		}
+ 	}
+ 
+@@ -174,6 +177,14 @@
+ 			}
+ 		}
+ 
++#if !PLATFORM_WINDOWS
++		if (OutFormats.IsEmpty())
++		{
++			OutFormats.Emplace(TEXT("SF_VULKAN_SM6"));
++			OutFormats.Emplace(TEXT("SF_VULKAN_SM5"));
++		}
++#endif
++
+ 		return OutFormats;
+ 	}
+ 
+@@ -205,9 +216,11 @@
+ 			static const TArray<FName> CachedFormats = GetAllTargetedShaderFormatsInternal(RelevantSettings);
+ 			OutFormats = CachedFormats;
+ 
++#if PLATFORM_WINDOWS
+ 			// We always support ray tracing shaders when cooking for D3D12 SM6, however we may skip them for SM5 based on project settings.
+ 			static FName NAME_PCD3D_SM6(TEXT("PCD3D_SM6"));
+ 			OutFormats.Emplace(NAME_PCD3D_SM6);
++#endif
+ 		}
+ 	}
+ 
+@@ -238,7 +251,9 @@
+ 
+ 	virtual void GetShaderFormatModuleHints(TArray<FName>& OutModuleNames) const override
+ 	{
++#if PLATFORM_WINDOWS
+ 		OutModuleNames.Add(TEXT("ShaderFormatD3D"));
++#endif
+ 		OutModuleNames.Add(TEXT("ShaderFormatOpenGL"));
+ 		OutModuleNames.Add(TEXT("VulkanShaderFormat"));
+ 	}
+--- a/Engine/Source/Programs/Windows/BootstrapPackagedGame/Private/BootstrapPackagedGame.cpp
++++ b/Engine/Source/Programs/Windows/BootstrapPackagedGame/Private/BootstrapPackagedGame.cpp
+@@ -528,10 +528,53 @@
+ 
+ 	// Get the executable to run
+ 	WCHAR* ExecFile = FindBestExecFile(hInstance, BaseDirectory);
++	WCHAR* FallbackBaseArgs = NULL;
+ 	if(ExecFile == NULL)
+ 	{
+-		MessageBoxW(NULL, L"This program is used for packaged games and is not meant to be run directly.", NULL, MB_OK);
+-		return 9000;
++		// Fallback for packages staged on a non-Windows host (e.g. Linux cross-compilation)
++		// where Win32 UpdateResourceW could not patch IDI_EXEC_FILE.
++		WCHAR ModuleName[MAX_PATH];
++		wcscpy_s(ModuleName, PathFindFileNameW(CurrentModuleFile));
++		PathRemoveExtensionW(ModuleName);
++
++		WCHAR CandidateRelPath[MAX_PATH];
++		swprintf(CandidateRelPath, MAX_PATH, L"%s\\Binaries\\Win64\\%s.exe", ModuleName, ModuleName);
++		WCHAR CandidateFullPath[MAX_PATH];
++		PathCombineW(CandidateFullPath, BaseDirectory, CandidateRelPath);
++
++		if (GetFileAttributesW(CandidateFullPath) != INVALID_FILE_ATTRIBUTES)
++		{
++			size_t Len = wcslen(CandidateRelPath) + 1;
++			ExecFile = new WCHAR[Len];
++			wcscpy_s(ExecFile, Len, CandidateRelPath);
++		}
++		else
++		{
++			WCHAR SearchPattern[MAX_PATH];
++			swprintf(SearchPattern, MAX_PATH, L"%s\\%s\\Binaries\\Win64\\%s-Win64-*.exe", BaseDirectory, ModuleName, ModuleName);
++			WIN32_FIND_DATAW FindData;
++			HANDLE hFind = FindFirstFileW(SearchPattern, &FindData);
++			if (hFind != INVALID_HANDLE_VALUE)
++			{
++				swprintf(CandidateRelPath, MAX_PATH, L"%s\\Binaries\\Win64\\%s", ModuleName, FindData.cFileName);
++				FindClose(hFind);
++				size_t Len = wcslen(CandidateRelPath) + 1;
++				ExecFile = new WCHAR[Len];
++				wcscpy_s(ExecFile, Len, CandidateRelPath);
++			}
++		}
++
++		if (ExecFile != NULL)
++		{
++			size_t ArgsLen = wcslen(ModuleName) + 1;
++			FallbackBaseArgs = new WCHAR[ArgsLen];
++			wcscpy_s(FallbackBaseArgs, ArgsLen, ModuleName);
++		}
++		else
++		{
++			MessageBoxW(NULL, L"This program is used for packaged games and is not meant to be run directly.", NULL, MB_OK);
++			return 9000;
++		}
+ 	}
+ 
+ 	// Get the directory containing the target to be executed
+@@ -561,6 +604,19 @@
+ 
+ 	// Create a full command line for the program to run
+ 	WCHAR* BaseArgs = ReadResourceString(hInstance, MAKEINTRESOURCE(IDI_EXEC_ARGS));
++	if (BaseArgs == NULL)
++	{
++		BaseArgs = FallbackBaseArgs;
++		FallbackBaseArgs = NULL;
++	}
++	else if (FallbackBaseArgs != NULL)
++	{
++		delete[] FallbackBaseArgs;
++	}
++	if (BaseArgs == NULL)
++	{
++		BaseArgs = new WCHAR[1]{ 0 };
++	}
+ 	size_t ChildCmdLineLength = wcslen(BaseDirectory) + wcslen(ExecFile) + wcslen(BaseArgs) + wcslen(CmdLine) + 20;
+ 	WCHAR* ChildCmdLine = new WCHAR[ChildCmdLineLength];
+ 	swprintf(ChildCmdLine, ChildCmdLineLength, L"\"%s\\%s\" %s %s", BaseDirectory, ExecFile, BaseArgs, CmdLine);

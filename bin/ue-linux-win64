@@ -1,0 +1,535 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PATCH_FILE="$REPO_ROOT/patches/ue5.8-linux-win64.patch"
+
+DEFAULT_SYSROOT="${UE_WIN64_SYSROOT:-$HOME/.local/share/ue-linux-win64/sysroot}"
+DEFAULT_XWIN_CACHE="${UE_WIN64_XWIN_CACHE:-$HOME/.local/share/ue-linux-win64/xwin-cache}"
+INSTALL_INI="$HOME/.config/Epic/UnrealEngine/Install.ini"
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+log_info()  { echo -e "${BLUE}[ue-linux-win64]${NC} $*"; }
+log_ok()    { echo -e "${GREEN}[ue-linux-win64]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[ue-linux-win64]${NC} $*" >&2; }
+log_error() { echo -e "${RED}[ue-linux-win64]${NC} $*" >&2; }
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") <command> [options]
+
+Cross-compile and package Unreal Engine 5.8 projects from Linux to Windows (Win64).
+
+Commands:
+  setup-engine <engine_dir> [--sysroot <dir>] [--skip-build]
+      1. Downloads & splats MSVC + Windows 11 SDK sysroot via xwin (cached)
+      2. Configures case-folding symlinks & LLVM clang-cl / lld-link / llvm-rc
+      3. Applies the UE 5.8 Linux->Win64 patch (UBT + WindowsTargetPlatform + BootstrapPackagedGame)
+      4. Rebuilds UnrealBuildTool, BootstrapPackagedGame (Win64 Shipping), and WindowsTargetPlatform (Linux Editor)
+
+  setup-project [project_dir_or_uproject]
+      Configures Config/DefaultEngine.ini for Linux->Win64 cross-compilation
+      (Compiler=Clang, DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan, Vulkan SM5/SM6 shaders).
+
+  package [project_dir_or_uproject] [options] [-- <extra_uat_args>...]
+      Cross-compiles, cooks (Vulkan SM5/SM6), stages, and packages a Windows (Win64) build from Linux.
+      Options:
+        --engine <dir>     Explicit path to the Unreal Engine root directory
+        --config <cfg>     Build configuration: DebugGame | Development | Shipping (default: Shipping)
+        --output <dir>     Output archive directory (default: <project>/Saved/StagedBuilds/Win64_Package)
+
+  status [engine_dir]
+      Displays the status of the Win64 sysroot, LLVM tools, and Unreal Engine patch/binaries.
+
+Environment variables:
+  UE_WIN64_SYSROOT     Override sysroot path (default: ~/.local/share/ue-linux-win64/sysroot)
+  UE_WIN64_XWIN_CACHE  Override xwin download cache (default: ~/.local/share/ue-linux-win64/xwin-cache)
+EOF
+}
+
+find_uproject() {
+    local target="${1:-.}"
+    if [[ -f "$target" && "$target" == *.uproject ]]; then
+        realpath "$target"
+        return 0
+    fi
+    if [[ -d "$target" ]]; then
+        local found
+        found=$(find "$target" -maxdepth 1 -name "*.uproject" | head -n 1)
+        if [[ -n "$found" ]]; then
+            realpath "$found"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+resolve_engine_from_uproject() {
+    local uproject="$1"
+    if [[ ! -f "$INSTALL_INI" ]]; then
+        return 1
+    fi
+    local assoc=""
+    if command -v jq >/dev/null 2>&1; then
+        assoc=$(jq -r '.EngineAssociation // empty' "$uproject" 2>/dev/null || true)
+    else
+        assoc=$(grep -oP '"EngineAssociation"\s*:\s*"\K[^"]+' "$uproject" 2>/dev/null || true)
+    fi
+    if [[ -z "$assoc" ]]; then
+        return 1
+    fi
+    local engine_path
+    engine_path=$(grep -F "$assoc=" "$INSTALL_INI" | cut -d'=' -f2- | tr -d '\r' | head -n 1 || true)
+    if [[ -n "$engine_path" && -d "$engine_path" ]]; then
+        realpath "$engine_path"
+        return 0
+    fi
+    return 1
+}
+
+find_working_lld_link() {
+    local engine_dir="${1:-}"
+    local candidate
+    for candidate in $(which -a lld-link 2>/dev/null || true); do
+        if ldd "$candidate" 2>/dev/null | grep -q "libxml2"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    for candidate in /nix/store/*-lld-20*/bin/lld-link /nix/store/*-lld-*/bin/lld-link; do
+        if [[ -x "$candidate" ]] && ldd "$candidate" 2>/dev/null | grep -q "libxml2"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    if command -v lld-link >/dev/null 2>&1; then
+        command -v lld-link
+        return 0
+    fi
+    if [[ -n "$engine_dir" ]]; then
+        local bundled
+        bundled=$(find "$engine_dir/Engine/Extras/ThirdPartyNotUE/SDKs/HostLinux/Linux_x64" -name "lld-link" 2>/dev/null | head -n 1 || true)
+        if [[ -n "$bundled" ]]; then
+            echo "$bundled"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+setup_sysroot() {
+    local sysroot_dir="$1"
+    local engine_dir="${2:-}"
+
+    if ! command -v xwin >/dev/null 2>&1; then
+        log_error "'xwin' is required to download the MSVC + Windows SDK sysroot."
+        log_error "Run inside 'nix develop' or install xwin (cargo install xwin)."
+        exit 1
+    fi
+
+    mkdir -p "$sysroot_dir" "$DEFAULT_XWIN_CACHE"
+
+    if [[ ! -d "$sysroot_dir/Windows Kits/10/Include" ]]; then
+        log_info "Downloading and splatting MSVC + Windows 11 SDK sysroot into $sysroot_dir..."
+        xwin --accept-license --cache-dir "$DEFAULT_XWIN_CACHE" --arch x86_64 --sdk-version 10.0.22621 splat --preserve-ms-arch-notation --include-debug-libs --output "$sysroot_dir"
+    else
+        log_info "Existing xwin sysroot detected at $sysroot_dir."
+    fi
+
+    # 1. Ensure MSVC directory has a non-banned 3-component version (14.44.35211)
+    local msvc_base="$sysroot_dir/VC/Tools/MSVC"
+    if [[ -d "$msvc_base" ]]; then
+        local existing_ver=""
+        for d in "$msvc_base"/*; do
+            [[ -d "$d" && ! -L "$d" ]] && existing_ver="$(basename "$d")" && break
+        done
+        if [[ -n "$existing_ver" && "$existing_ver" != "14.44.35211" && ! -d "$msvc_base/14.44.35211" ]]; then
+            mv "$msvc_base/$existing_ver" "$msvc_base/14.44.35211"
+            ln -sfn "14.44.35211" "$msvc_base/$existing_ver"
+        fi
+    fi
+
+    local msvc_dir="$msvc_base/14.44.35211"
+    if [[ ! -d "$msvc_dir" ]]; then
+        msvc_dir=$(find "$msvc_base" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+    fi
+
+    ln -sfn include "$msvc_dir/INCLUDE"
+    mkdir -p "$msvc_dir/bin/Hostx64/x64"
+
+    # 2. Locate Clang & LLD tools
+    local bundled_gnu=""
+    if [[ -n "$engine_dir" && -d "$engine_dir/Engine/Extras/ThirdPartyNotUE/SDKs/HostLinux/Linux_x64" ]]; then
+        bundled_gnu=$(find "$engine_dir/Engine/Extras/ThirdPartyNotUE/SDKs/HostLinux/Linux_x64" -mindepth 2 -maxdepth 2 -type d -name "x86_64-unknown-linux-gnu" | head -n 1 || true)
+    fi
+
+    local clang_bin=""
+    if [[ -n "$bundled_gnu" && -x "$bundled_gnu/bin/clang++" ]]; then
+        clang_bin="$bundled_gnu/bin/clang++"
+    elif command -v clang-cl >/dev/null 2>&1; then
+        clang_bin="$(command -v clang-cl)"
+    else
+        log_error "Could not find clang++ or clang-cl."
+        exit 1
+    fi
+
+    local lld_link_bin
+    lld_link_bin=$(find_working_lld_link "$engine_dir") || {
+        log_error "Could not find lld-link."
+        exit 1
+    }
+
+    local llvm_rc_bin=""
+    if command -v llvm-rc >/dev/null 2>&1; then
+        llvm_rc_bin="$(command -v llvm-rc)"
+    elif [[ -n "$bundled_gnu" && -x "$bundled_gnu/bin/llvm-rc" ]]; then
+        llvm_rc_bin="$bundled_gnu/bin/llvm-rc"
+    else
+        log_error "Could not find llvm-rc."
+        exit 1
+    fi
+
+    local llvm_mt_bin=""
+    if command -v llvm-mt >/dev/null 2>&1; then
+        llvm_mt_bin="$(command -v llvm-mt)"
+    else
+        llvm_mt_bin="$(command -v true)"
+    fi
+
+    local llvm_cvtres_bin=""
+    if command -v llvm-cvtres >/dev/null 2>&1; then
+        llvm_cvtres_bin="$(command -v llvm-cvtres)"
+    else
+        llvm_cvtres_bin="$lld_link_bin"
+    fi
+
+    # 3. Populate MSVC Hostx64/x64 & LLVM symlinks in sysroot
+    ln -sfn "$clang_bin" "$msvc_dir/bin/Hostx64/x64/cl.exe"
+    ln -sfn "$lld_link_bin" "$msvc_dir/bin/Hostx64/x64/link.exe"
+    ln -sfn "$llvm_cvtres_bin" "$msvc_dir/bin/Hostx64/x64/cvtres.exe"
+
+    mkdir -p "$sysroot_dir/LLVM/20.1.8/bin" "$sysroot_dir/LLVM/20.1.8/lib/clang/20/lib"
+    ln -sfn "$clang_bin" "$sysroot_dir/LLVM/20.1.8/bin/clang-cl.exe"
+    ln -sfn "$lld_link_bin" "$sysroot_dir/LLVM/20.1.8/bin/lld-link.exe"
+    ln -sfn "$msvc_dir/lib/x64" "$sysroot_dir/LLVM/20.1.8/lib/clang/20/lib/windows"
+
+    if [[ -n "$bundled_gnu" ]]; then
+        ln -sfn "$clang_bin" "$bundled_gnu/bin/clang-cl.exe"
+        ln -sfn "$lld_link_bin" "$bundled_gnu/bin/lld-link.exe"
+        if [[ -d "$bundled_gnu/lib/clang/20" ]]; then
+            mkdir -p "$bundled_gnu/lib/clang/20/lib"
+            ln -sfn "$msvc_dir/lib/x64" "$bundled_gnu/lib/clang/20/lib/windows"
+            ln -sfn "$bundled_gnu/lib/clang/20/include" "$sysroot_dir/LLVM/20.1.8/lib/clang/20/include"
+        fi
+    fi
+
+    # 4. Configure Windows Kits/10 symlinks & case-folding .lib links
+    local kits_dir="$sysroot_dir/Windows Kits/10"
+    ln -sfn Include "$kits_dir/include"
+    ln -sfn Lib "$kits_dir/lib"
+    if [[ -d "$kits_dir/Include/10.0.22621" && ! -e "$kits_dir/Include/10.0.22621.0" ]]; then
+        ln -sfn 10.0.22621 "$kits_dir/Include/10.0.22621.0"
+    fi
+    if [[ -d "$kits_dir/Lib/10.0.22621" && ! -e "$kits_dir/Lib/10.0.22621.0" ]]; then
+        ln -sfn 10.0.22621 "$kits_dir/Lib/10.0.22621.0"
+    fi
+
+    mkdir -p "$kits_dir/bin/10.0.22621.0/x64" "$kits_dir/bin/10.0.22621/x64"
+    ln -sfn "$llvm_rc_bin" "$kits_dir/bin/10.0.22621.0/x64/rc.exe"
+    ln -sfn "$llvm_mt_bin" "$kits_dir/bin/10.0.22621.0/x64/mt.exe"
+    ln -sfn "$clang_bin" "$kits_dir/bin/10.0.22621.0/x64/clang-cl"
+    ln -sfn "$llvm_rc_bin" "$kits_dir/bin/10.0.22621/x64/rc.exe"
+    ln -sfn "$llvm_mt_bin" "$kits_dir/bin/10.0.22621/x64/mt.exe"
+    ln -sfn "$clang_bin" "$kits_dir/bin/10.0.22621/x64/clang-cl"
+
+    log_info "Creating case-insensitive .lib symlinks in Windows SDK..."
+    for libdir in "$kits_dir/Lib/10.0.22621/um/x64" "$kits_dir/Lib/10.0.22621/ucrt/x64" "$msvc_dir/lib/x64"; do
+        [[ -d "$libdir" ]] || continue
+        pushd "$libdir" >/dev/null
+        for f in *.lib *.Lib *.LIB; do
+            [[ -e "$f" ]] || continue
+            local lower="${f,,}"
+            local upper="${f^^}"
+            local base="${lower%.lib}"
+            local cap="${base^}.lib"
+            [[ "$f" != "$lower" && ! -e "$lower" ]] && ln -s "$f" "$lower" || true
+            [[ "$f" != "$upper" && ! -e "$upper" ]] && ln -s "$f" "$upper" || true
+            [[ "$f" != "$cap" && ! -e "$cap" ]] && ln -s "$f" "$cap" || true
+        done
+        popd >/dev/null
+    done
+
+    log_ok "Sysroot ready at $sysroot_dir"
+}
+
+cmd_setup_engine() {
+    local engine_dir=""
+    local sysroot_dir="$DEFAULT_SYSROOT"
+    local skip_build=0
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --sysroot)
+                sysroot_dir="$(realpath -m "$2")"
+                shift 2
+                ;;
+            --skip-build)
+                skip_build=1
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                if [[ -z "$engine_dir" ]]; then
+                    engine_dir="$(realpath "$1")"
+                    shift
+                else
+                    log_error "Unknown argument: $1"
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    if [[ -z "$engine_dir" || ! -d "$engine_dir/Engine" ]]; then
+        log_error "Please provide a valid Unreal Engine root directory."
+        usage
+        exit 1
+    fi
+
+    setup_sysroot "$sysroot_dir" "$engine_dir"
+
+    log_info "Checking Unreal Engine 5.8 Linux->Win64 patch on $engine_dir..."
+    pushd "$engine_dir" >/dev/null
+    if patch -p1 -R --dry-run -s < "$PATCH_FILE" >/dev/null 2>&1; then
+        log_ok "Patch is already applied."
+    elif patch -p1 --dry-run -s < "$PATCH_FILE" >/dev/null 2>&1; then
+        log_info "Applying patch $PATCH_FILE..."
+        patch -p1 < "$PATCH_FILE"
+        log_ok "Patch applied successfully."
+    else
+        log_error "Patch could not be applied cleanly to $engine_dir."
+        popd >/dev/null
+        exit 1
+    fi
+
+    if [[ "$skip_build" -eq 0 ]]; then
+        export UE_WIN64_SYSROOT="$sysroot_dir"
+        log_info "Building & publishing UnrealBuildTool..."
+        ./Engine/Build/BatchFiles/BuildUBT.sh
+
+        log_info "Cross-compiling BootstrapPackagedGame (Win64 Shipping)..."
+        ./Engine/Build/BatchFiles/Linux/Build.sh BootstrapPackagedGame Win64 Shipping
+
+        log_info "Building WindowsTargetPlatform modules for UnrealEditor (Linux Development)..."
+        ./Engine/Build/BatchFiles/Linux/Build.sh UnrealEditor Linux Development
+        log_ok "Unreal Engine at $engine_dir is ready for Linux->Win64 cross-compilation!"
+    fi
+    popd >/dev/null
+}
+
+cmd_setup_project() {
+    local target="${1:-.}"
+    local uproject
+    if ! uproject=$(find_uproject "$target"); then
+        log_error "No .uproject found in '$target'."
+        exit 1
+    fi
+
+    local project_dir
+    project_dir="$(dirname "$uproject")"
+    local config_dir="$project_dir/Config"
+    local engine_ini="$config_dir/DefaultEngine.ini"
+
+    mkdir -p "$config_dir"
+    touch "$engine_ini"
+
+    if grep -q "^\[/Script/WindowsTargetPlatform\.WindowsTargetSettings\]" "$engine_ini" 2>/dev/null; then
+        if grep -q "DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan" "$engine_ini" 2>/dev/null && grep -q "Compiler=Clang" "$engine_ini" 2>/dev/null; then
+            log_ok "Project $(basename "$uproject") is already configured for Linux->Win64 (Vulkan + Clang)."
+            return 0
+        fi
+    fi
+
+    log_info "Configuring $engine_ini for Linux->Win64 cross-compilation (Clang + Vulkan SM5/SM6)..."
+    cat >> "$engine_ini" << 'EOF'
+
+[/Script/WindowsTargetPlatform.WindowsTargetSettings]
+Compiler=Clang
+DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan
+-D3D12TargetedShaderFormats=PCD3D_SM6
+-D3D12TargetedShaderFormats=PCD3D_SM5
+-D3D11TargetedShaderFormats=PCD3D_SM5
++TargetedRHIs=SF_VULKAN_SM6
++TargetedRHIs=SF_VULKAN_SM5
++VulkanTargetedShaderFormats=SF_VULKAN_SM6
++VulkanTargetedShaderFormats=SF_VULKAN_SM5
+EOF
+    log_ok "Project $(basename "$uproject") configured for Linux->Win64!"
+}
+
+cmd_package() {
+    local target="."
+    local engine_dir=""
+    local config="Shipping"
+    local output_dir=""
+    local extra_args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --engine)
+                engine_dir="$(realpath "$2")"
+                shift 2
+                ;;
+            --config)
+                config="$2"
+                shift 2
+                ;;
+            --output)
+                output_dir="$(realpath -m "$2")"
+                shift 2
+                ;;
+            --)
+                shift
+                extra_args+=("$@")
+                break
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -*)
+                extra_args+=("$1")
+                shift
+                ;;
+            *)
+                target="$1"
+                shift
+                ;;
+        esac
+    done
+
+    local uproject
+    if ! uproject=$(find_uproject "$target"); then
+        log_error "No .uproject found in '$target'."
+        exit 1
+    fi
+
+    local project_dir
+    project_dir="$(dirname "$uproject")"
+    if [[ -z "$output_dir" ]]; then
+        output_dir="$project_dir/Saved/StagedBuilds/Win64_Package"
+    fi
+
+    if [[ -z "$engine_dir" ]]; then
+        if ! engine_dir=$(resolve_engine_from_uproject "$uproject"); then
+            log_error "Could not resolve Engine path from $uproject. Pass --engine <dir>."
+            exit 1
+        fi
+    fi
+
+    if [[ ! -f "$engine_dir/Engine/Binaries/Linux/libUnrealEditor-WindowsTargetPlatform.so" ]]; then
+        log_warn "Engine at $engine_dir does not have libUnrealEditor-WindowsTargetPlatform.so yet."
+        log_info "Running 'setup-engine $engine_dir' first..."
+        cmd_setup_engine "$engine_dir"
+    fi
+
+    cmd_setup_project "$uproject"
+
+    export UE_WIN64_SYSROOT="$DEFAULT_SYSROOT"
+    mkdir -p "$output_dir"
+
+    log_info "Packaging $(basename "$uproject") for Win64 ($config) -> $output_dir"
+    "$engine_dir/Engine/Build/BatchFiles/RunUAT.sh" BuildCookRun \
+        -project="$uproject" \
+        -noP4 \
+        -platform=Win64 \
+        -clientconfig="$config" \
+        -serverconfig="$config" \
+        -cook \
+        -allmaps \
+        -build \
+        -stage \
+        -pak \
+        -archive \
+        -archivedirectory="$output_dir" \
+        -utf8output \
+        "${extra_args[@]}"
+
+    log_ok "Windows (Win64) package completed in: $output_dir"
+}
+
+cmd_status() {
+    local engine_dir="${1:-}"
+    echo "=== ue-linux-win64 Status ==="
+    if [[ -d "$DEFAULT_SYSROOT/Windows Kits/10/Include" ]]; then
+        echo -e "Sysroot:             ${GREEN}Installed${NC} ($DEFAULT_SYSROOT)"
+    else
+        echo -e "Sysroot:             ${RED}Missing${NC} ($DEFAULT_SYSROOT)"
+    fi
+
+    for tool in xwin clang-cl lld-link llvm-rc; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            echo -e "Tool ($tool): $(printf '%*s' $((14 - ${#tool})) '')${GREEN}$(command -v "$tool")${NC}"
+        else
+            echo -e "Tool ($tool): $(printf '%*s' $((14 - ${#tool})) '')${YELLOW}Not in PATH${NC}"
+        fi
+    done
+
+    if [[ -z "$engine_dir" ]] && uproject=$(find_uproject "." 2>/dev/null); then
+        engine_dir=$(resolve_engine_from_uproject "$uproject" 2>/dev/null || true)
+    fi
+
+    if [[ -n "$engine_dir" && -d "$engine_dir/Engine" ]]; then
+        echo "Engine Directory:    $engine_dir"
+        if (cd "$engine_dir" && patch -p1 -R --dry-run -s < "$PATCH_FILE" >/dev/null 2>&1); then
+            echo -e "Engine Source Patch: ${GREEN}Applied${NC}"
+        else
+            echo -e "Engine Source Patch: ${RED}Not Applied${NC}"
+        fi
+        if [[ -f "$engine_dir/Engine/Binaries/Win64/BootstrapPackagedGame-Win64-Shipping.exe" ]]; then
+            echo -e "Win64 Bootstrapper:  ${GREEN}Built${NC}"
+        else
+            echo -e "Win64 Bootstrapper:  ${RED}Not Built${NC}"
+        fi
+        if [[ -f "$engine_dir/Engine/Binaries/Linux/libUnrealEditor-WindowsTargetPlatform.so" ]]; then
+            echo -e "Linux Win64 Cookers: ${GREEN}Built${NC}"
+        else
+            echo -e "Linux Win64 Cookers: ${RED}Not Built${NC}"
+        fi
+    fi
+}
+
+COMMAND="${1:-}"
+shift || true
+
+case "$COMMAND" in
+    setup-engine)
+        cmd_setup_engine "$@"
+        ;;
+    setup-project)
+        cmd_setup_project "$@"
+        ;;
+    package)
+        cmd_package "$@"
+        ;;
+    status)
+        cmd_status "$@"
+        ;;
+    -h|--help|"")
+        usage
+        ;;
+    *)
+        log_error "Unknown command: $COMMAND"
+        usage
+        exit 1
+        ;;
+esac

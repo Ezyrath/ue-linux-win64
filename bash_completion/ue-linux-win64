@@ -1,0 +1,47 @@
+# bash completion for ue-linux-win64
+_ue_linux_win64() {
+    local cur prev words cword
+    _init_completion || return
+
+    local subcommands="setup-engine setup-project package status"
+
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$subcommands -h --help" -- "$cur") )
+        return 0
+    fi
+
+    local cmd="${words[1]}"
+    case "$cmd" in
+        setup-engine)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--sysroot --skip-build -h --help" -- "$cur") )
+            else
+                _filedir -d
+            fi
+            ;;
+        setup-project)
+            _filedir '@(uproject)'
+            ;;
+        package)
+            case "$prev" in
+                --config)
+                    COMPREPLY=( $(compgen -W "DebugGame Development Shipping" -- "$cur") )
+                    return 0
+                    ;;
+                --engine|--output)
+                    _filedir -d
+                    return 0
+                    ;;
+            esac
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "--engine --config --output -h --help" -- "$cur") )
+            else
+                _filedir '@(uproject)'
+            fi
+            ;;
+        status)
+            _filedir -d
+            ;;
+    esac
+}
+complete -F _ue_linux_win64 ue-linux-win64
