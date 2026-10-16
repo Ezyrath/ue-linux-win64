@@ -23,6 +23,7 @@
       llvmPackages_20.clang-unwrapped
       llvmPackages_20.lld
       llvmPackages_20.bintools-unwrapped
+      wine64Packages.stable
     ];
   in {
     packages.${system} = {

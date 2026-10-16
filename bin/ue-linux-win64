@@ -98,25 +98,25 @@ find_working_lld_link() {
     local candidate
     for candidate in $(which -a lld-link 2>/dev/null || true); do
         if ldd "$candidate" 2>/dev/null | grep -q "libxml2"; then
-            echo "$candidate"
+            readlink -f "$candidate"
             return 0
         fi
     done
     for candidate in /nix/store/*-lld-20*/bin/lld-link /nix/store/*-lld-*/bin/lld-link; do
         if [[ -x "$candidate" ]] && ldd "$candidate" 2>/dev/null | grep -q "libxml2"; then
-            echo "$candidate"
+            readlink -f "$candidate"
             return 0
         fi
     done
     if command -v lld-link >/dev/null 2>&1; then
-        command -v lld-link
+        readlink -f "$(command -v lld-link)"
         return 0
     fi
     if [[ -n "$engine_dir" ]]; then
         local bundled
         bundled=$(find "$engine_dir/Engine/Extras/ThirdPartyNotUE/SDKs/HostLinux/Linux_x64" -name "lld-link" 2>/dev/null | head -n 1 || true)
         if [[ -n "$bundled" ]]; then
-            echo "$bundled"
+            readlink -f "$bundled"
             return 0
         fi
     fi
@@ -132,7 +132,7 @@ setup_sysroot() {
     if [[ ! -d "$sysroot_dir/Windows Kits/10/Include" ]]; then
         local xwin_bin=""
         if command -v xwin >/dev/null 2>&1; then
-            xwin_bin="$(command -v xwin)"
+            xwin_bin="$(readlink -f "$(command -v xwin)")"
         else
             for cand in /nix/store/*-xwin-*/bin/xwin; do
                 [[ -x "$cand" ]] && xwin_bin="$cand" && break
@@ -180,7 +180,7 @@ setup_sysroot() {
     if [[ -n "$bundled_gnu" && -x "$bundled_gnu/bin/clang++" ]]; then
         clang_bin="$bundled_gnu/bin/clang++"
     elif command -v clang-cl >/dev/null 2>&1; then
-        clang_bin="$(command -v clang-cl)"
+        clang_bin="$(readlink -f "$(command -v clang-cl)")"
     else
         log_error "Could not find clang++ or clang-cl."
         exit 1
@@ -194,7 +194,7 @@ setup_sysroot() {
 
     local llvm_rc_bin=""
     if command -v llvm-rc >/dev/null 2>&1; then
-        llvm_rc_bin="$(command -v llvm-rc)"
+        llvm_rc_bin="$(readlink -f "$(command -v llvm-rc)")"
     elif [[ -n "$bundled_gnu" && -x "$bundled_gnu/bin/llvm-rc" ]]; then
         llvm_rc_bin="$bundled_gnu/bin/llvm-rc"
     else
@@ -209,17 +209,17 @@ setup_sysroot() {
 
     local llvm_mt_bin=""
     if command -v llvm-mt >/dev/null 2>&1; then
-        llvm_mt_bin="$(command -v llvm-mt)"
+        llvm_mt_bin="$(readlink -f "$(command -v llvm-mt)")"
     else
         for cand in /nix/store/*-llvm-bin-20*/bin/llvm-mt /nix/store/*-llvm-20*/bin/llvm-mt; do
             [[ -x "$cand" ]] && llvm_mt_bin="$cand" && break
         done
-        [[ -z "$llvm_mt_bin" ]] && llvm_mt_bin="$(command -v true)"
+        [[ -z "$llvm_mt_bin" ]] && llvm_mt_bin="$(readlink -f "$(command -v true)")"
     fi
 
     local llvm_cvtres_bin=""
     if command -v llvm-cvtres >/dev/null 2>&1; then
-        llvm_cvtres_bin="$(command -v llvm-cvtres)"
+        llvm_cvtres_bin="$(readlink -f "$(command -v llvm-cvtres)")"
     else
         for cand in /nix/store/*-llvm-bin-20*/bin/llvm-cvtres /nix/store/*-llvm-20*/bin/llvm-cvtres; do
             [[ -x "$cand" ]] && llvm_cvtres_bin="$cand" && break
@@ -259,12 +259,11 @@ setup_sysroot() {
     fi
 
     mkdir -p "$kits_dir/bin/10.0.22621.0/x64" "$kits_dir/bin/10.0.22621/x64"
-    ln -sfn "$llvm_rc_bin" "$kits_dir/bin/10.0.22621.0/x64/rc.exe"
-    ln -sfn "$llvm_mt_bin" "$kits_dir/bin/10.0.22621.0/x64/mt.exe"
-    ln -sfn "$clang_bin" "$kits_dir/bin/10.0.22621.0/x64/clang-cl"
-    ln -sfn "$llvm_rc_bin" "$kits_dir/bin/10.0.22621/x64/rc.exe"
-    ln -sfn "$llvm_mt_bin" "$kits_dir/bin/10.0.22621/x64/mt.exe"
-    ln -sfn "$clang_bin" "$kits_dir/bin/10.0.22621/x64/clang-cl"
+    for rc_dir in "$kits_dir/bin/10.0.22621.0/x64" "$kits_dir/bin/10.0.22621/x64"; do
+        ln -sfn "$llvm_rc_bin" "$rc_dir/rc.exe"
+        ln -sfn "$llvm_mt_bin" "$rc_dir/mt.exe"
+        ln -sfn "$clang_bin" "$rc_dir/clang-cl"
+    done
 
     log_info "Creating case-insensitive .lib and .h symlinks in Windows SDK..."
     for libdir in "$kits_dir/Lib/10.0.22621/um/x64" "$kits_dir/Lib/10.0.22621/ucrt/x64" "$msvc_dir/lib/x64"; do
@@ -384,6 +383,113 @@ setup_engine_thirdparty_symlinks() {
     done
 }
 
+find_wine_bin() {
+    if command -v wine >/dev/null 2>&1; then
+        command -v wine
+        return 0
+    elif command -v wine64 >/dev/null 2>&1; then
+        command -v wine64
+        return 0
+    fi
+    for cand in /nix/store/*-wine64-*/bin/wine /nix/store/*-wine-*/bin/wine; do
+        if [[ -x "$cand" ]]; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+setup_ispc_wrapper() {
+    local engine_dir="$1"
+    local ispc_linux_dir="$engine_dir/Engine/Source/ThirdParty/Intel/ISPC/bin/Linux"
+    local ispc_win_exe="$engine_dir/Engine/Source/ThirdParty/Intel/ISPC/bin/Windows/ispc.exe"
+    local ispc_bin="$ispc_linux_dir/ispc"
+    local ispc_real="$ispc_linux_dir/ispc.linux"
+
+    if [[ ! -d "$ispc_linux_dir" || ! -f "$ispc_win_exe" ]]; then
+        return 0
+    fi
+
+    log_info "Configuring ISPC Linux->Windows wrapper (via Wine + Windows/ispc.exe)..."
+    if [[ -f "$ispc_bin" && ! -f "$ispc_real" ]]; then
+        if file "$ispc_bin" | grep -q "ELF"; then
+            mv "$ispc_bin" "$ispc_real"
+        fi
+    fi
+
+    cat > "$ispc_bin" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REAL_ISPC="$SCRIPT_DIR/ispc.linux"
+WIN_ISPC="$SCRIPT_DIR/../Windows/ispc.exe"
+
+use_wine=0
+for arg in "$@"; do
+    if [[ "$arg" == "--target-os=windows" ]]; then
+        use_wine=1
+        break
+    elif [[ "$arg" == @* ]]; then
+        rsp_file="${arg#@}"
+        rsp_file="${rsp_file%\"}"
+        rsp_file="${rsp_file#\"}"
+        if [[ -f "$rsp_file" ]] && grep -q -- "--target-os=windows" "$rsp_file" 2>/dev/null; then
+            use_wine=1
+            break
+        fi
+    fi
+done
+
+if [[ "$use_wine" -eq 1 ]]; then
+    wine_bin=""
+    if command -v wine >/dev/null 2>&1; then
+        wine_bin="$(command -v wine)"
+    elif command -v wine64 >/dev/null 2>&1; then
+        wine_bin="$(command -v wine64)"
+    else
+        for cand in /nix/store/*-wine64-*/bin/wine /nix/store/*-wine-*/bin/wine; do
+            [[ -x "$cand" ]] && wine_bin="$cand" && break
+        done
+    fi
+    if [[ -z "$wine_bin" ]]; then
+        echo "Error: wine is required to run Windows/ispc.exe for --target-os=windows." >&2
+        exit 1
+    fi
+    export WINEDEBUG=-all
+    export WINEDLLOVERRIDES="mscoree,mshtml="
+    unset DISPLAY WAYLAND_DISPLAY
+    export WINEPREFIX="${UE_WIN64_WINEPREFIX:-${XDG_CACHE_HOME:-$HOME/.cache}/ue-linux-win64-wine}"
+    mkdir -p "$WINEPREFIX"
+    exec "$wine_bin" "$WIN_ISPC" "$@"
+else
+    exec "$REAL_ISPC" "$@"
+fi
+EOF
+    chmod +x "$ispc_bin"
+
+    local wine_bin=""
+    if wine_bin=$(find_wine_bin); then
+        local wine_prefix="${UE_WIN64_WINEPREFIX:-${XDG_CACHE_HOME:-$HOME/.cache}/ue-linux-win64-wine}"
+        if [[ ! -d "$wine_prefix/drive_c" ]]; then
+            log_info "Initializing headless Wine prefix for ISPC at $wine_prefix..."
+            mkdir -p "$wine_prefix"
+            WINEPREFIX="$wine_prefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" DISPLAY= WAYLAND_DISPLAY= "$wine_bin" wineboot -u >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+register_editor_modules() {
+    local modules_file="$1"
+    [[ -f "$modules_file" ]] || return 0
+    for mod in WindowsTargetPlatform WindowsTargetPlatformSettings WindowsTargetPlatformControls WindowsPlatformEditor; do
+        if ! grep -q "\"$mod\"" "$modules_file"; then
+            sed -i "s/\"Modules\": \[/\"Modules\": [/g; /\"Modules\":/,/}/ { /\"UnrealEd\":/a \\		\"$mod\": \"libUnrealEditor-$mod.so\",
+            }" "$modules_file"
+        fi
+    done
+}
+
 cmd_setup_engine() {
     local engine_dir=""
     local sysroot_dir="$DEFAULT_SYSROOT"
@@ -423,6 +529,7 @@ cmd_setup_engine() {
 
     setup_sysroot "$sysroot_dir" "$engine_dir"
     setup_engine_thirdparty_symlinks "$engine_dir"
+    setup_ispc_wrapper "$engine_dir"
 
     log_info "Checking Unreal Engine 5.8 Linux->Win64 patch on $engine_dir..."
     pushd "$engine_dir" >/dev/null
@@ -442,15 +549,20 @@ cmd_setup_engine() {
         export UE_WIN64_SYSROOT="$sysroot_dir"
         log_info "Building & publishing UnrealBuildTool..."
         ./Engine/Build/BatchFiles/BuildUBT.sh
+        if [[ -d "Engine/Binaries/DotNET/AutomationTool/UnrealBuildTool" ]]; then
+            cp -f Engine/Binaries/DotNET/UnrealBuildTool/UnrealBuildTool.dll* Engine/Binaries/DotNET/AutomationTool/UnrealBuildTool/ 2>/dev/null || true
+        fi
 
         log_info "Cross-compiling BootstrapPackagedGame (Win64 Shipping)..."
         ./Engine/Build/BatchFiles/Linux/Build.sh BootstrapPackagedGame Win64 Shipping
 
-        log_info "Building WindowsTargetPlatform modules for UnrealEditor (Linux Development)..."
-        # Remove UnrealEditor.version so UBT's WriteMetadata action regenerates UnrealEditor.modules
-        # with WindowsTargetPlatform, WindowsTargetPlatformSettings, and WindowsTargetPlatformControls.
-        rm -f Engine/Binaries/Linux/UnrealEditor.version
-        ./Engine/Build/BatchFiles/Linux/Build.sh UnrealEditor Linux Development
+        log_info "Building WindowsTargetPlatform & WindowsPlatformEditor modules for UnrealEditor (Linux Development)..."
+        ./Engine/Build/BatchFiles/Linux/Build.sh UnrealEditor Linux Development \
+            -Module=WindowsTargetPlatform \
+            -Module=WindowsTargetPlatformSettings \
+            -Module=WindowsTargetPlatformControls \
+            -Module=WindowsPlatformEditor
+        register_editor_modules "Engine/Binaries/Linux/UnrealEditor.modules"
         log_ok "Unreal Engine at $engine_dir is ready for Linux->Win64 cross-compilation!"
     fi
     popd >/dev/null
@@ -474,6 +586,13 @@ cmd_setup_project() {
 
     if grep -q "^\[/Script/WindowsTargetPlatform\.WindowsTargetSettings\]" "$engine_ini" 2>/dev/null; then
         if grep -q "DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan" "$engine_ini" 2>/dev/null && grep -q "Compiler=Clang" "$engine_ini" 2>/dev/null; then
+            if ! grep -q "r.PSOPrecache.GlobalShaders=0" "$engine_ini" 2>/dev/null; then
+                cat >> "$engine_ini" << 'EOF'
+
+[SystemSettings]
+r.PSOPrecache.GlobalShaders=0
+EOF
+            fi
             log_ok "Project $(basename "$uproject") is already configured for Linux->Win64 (Vulkan + Clang)."
             return 0
         fi
@@ -599,9 +718,11 @@ cmd_status() {
         echo -e "Sysroot:             ${RED}Missing${NC} ($DEFAULT_SYSROOT)"
     fi
 
-    for tool in xwin clang-cl lld-link llvm-rc; do
+    for tool in xwin clang-cl lld-link llvm-rc wine; do
         if command -v "$tool" >/dev/null 2>&1; then
             echo -e "Tool ($tool): $(printf '%*s' $((14 - ${#tool})) '')${GREEN}$(command -v "$tool")${NC}"
+        elif [[ "$tool" == "wine" ]] && wine_found=$(find_wine_bin 2>/dev/null); then
+            echo -e "Tool ($tool): $(printf '%*s' $((14 - ${#tool})) '')${GREEN}$wine_found${NC}"
         else
             echo -e "Tool ($tool): $(printf '%*s' $((14 - ${#tool})) '')${YELLOW}Not in PATH${NC}"
         fi
@@ -618,6 +739,11 @@ cmd_status() {
         else
             echo -e "Engine Source Patch: ${RED}Not Applied${NC}"
         fi
+        if [[ -f "$engine_dir/Engine/Source/ThirdParty/Intel/ISPC/bin/Linux/ispc.linux" ]]; then
+            echo -e "ISPC Win64 Wrapper:  ${GREEN}Configured${NC}"
+        else
+            echo -e "ISPC Win64 Wrapper:  ${RED}Not Configured${NC}"
+        fi
         if [[ -f "$engine_dir/Engine/Binaries/Win64/BootstrapPackagedGame-Win64-Shipping.exe" ]]; then
             echo -e "Win64 Bootstrapper:  ${GREEN}Built${NC}"
         else
@@ -627,6 +753,11 @@ cmd_status() {
             echo -e "Linux Win64 Cookers: ${GREEN}Built${NC}"
         else
             echo -e "Linux Win64 Cookers: ${RED}Not Built${NC}"
+        fi
+        if [[ -f "$engine_dir/Engine/Binaries/Linux/libUnrealEditor-WindowsPlatformEditor.so" ]]; then
+            echo -e "Win64 Editor UI:     ${GREEN}Built${NC}"
+        else
+            echo -e "Win64 Editor UI:     ${RED}Not Built${NC}"
         fi
     fi
 }

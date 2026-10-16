@@ -35,21 +35,18 @@
  			if (Platform == UnrealTargetPlatform.Win64)
  			{
  				Target.WindowsPlatform.Architecture = Target.Architecture;
-@@ -1477,9 +1485,11 @@
+@@ -1477,9 +1485,9 @@
  				}
  			}
  
--			Target.bCompileISPC = true;
-+			// The bundled Linux ISPC binary does not include Windows target bitcode libraries (--target-os=windows).
-+			// Use UE's native C++ SIMD paths (INTEL_ISPC=0) when cross-compiling from non-Windows hosts.
-+			Target.bCompileISPC = OperatingSystem.IsWindows();
+ 			Target.bCompileISPC = true;
  
 -			if (OperatingSystem.IsWindows())
 +			if (OperatingSystem.IsWindows() || MicrosoftPlatformSDK.HasCompiler(Target.WindowsPlatform.Compiler, Target.WindowsPlatform.Architecture, Logger))
  			{
  				// Initialize the VC environment for the target, and set all the version numbers to the concrete values we chose
  				Target.WindowsPlatform.Environment = CreateVCEnvironment(Target);
-@@ -1790,7 +1800,6 @@
+@@ -1790,7 +1798,6 @@
  			return arch.ToString();
  		}
  
@@ -57,7 +54,7 @@
  		public static bool TryGetWindowsSdkDir(string? DesiredVersion, ILogger Logger, [NotNullWhen(true)] out VersionNumber? OutSdkVersion, [NotNullWhen(true)] out DirectoryReference? OutSdkDir)
  		{
  			return MicrosoftPlatformSDK.TryGetWindowsSdkDir(DesiredVersion, Logger, out OutSdkVersion, out OutSdkDir);
-@@ -1907,6 +1916,35 @@
+@@ -1907,6 +1914,40 @@
  		/// <param name="Target">The target being build</param>
  		public override void ModifyModuleRulesForOtherPlatform(string ModuleName, ModuleRules Rules, ReadOnlyTargetRules Target)
  		{
@@ -81,6 +78,11 @@
 +							bBuildShaderFormats = true;
 +						}
 +					}
++
++					if (ModuleName == "UnrealEd")
++					{
++						Rules.DynamicallyLoadedModuleNames.Add("WindowsPlatformEditor");
++					}
 +				}
 +
 +				if (ModuleName == "TargetPlatform" && bBuildShaderFormats)
@@ -93,7 +95,7 @@
  		}
  
  		/// <summary>
-@@ -2088,7 +2124,7 @@
+@@ -2088,7 +2129,7 @@
  			LinkEnvironment.SystemLibraries.Add("ws2_32.lib");
  			LinkEnvironment.SystemLibraries.Add("dbghelp.lib");
  			LinkEnvironment.SystemLibraries.Add("comctl32.lib");
@@ -637,3 +639,24 @@
                                  GlobalShaderType->GetName(), PermutationId);
                      }
  					else
+--- a/Engine/Source/Programs/UnrealBuildTool/ToolChain/ISPCToolChain.cs
++++ b/Engine/Source/Programs/UnrealBuildTool/ToolChain/ISPCToolChain.cs
+@@ -516,7 +516,7 @@
+ 			string ISPCArch = GetISPCArchTarget(CompileEnvironment.Platform, CompileEnvironment.Architecture);
+ 
+ 			// Build target triplet
+-			GlobalArguments.Add($"--target-os={GetISPCOSTarget(CompileEnvironment.Platform)}");
++			GlobalArguments.Add($"--target-os={GetISPCOSTarget(OperatingSystem.IsWindows() ? CompileEnvironment.Platform : BuildHostPlatform.Current.Platform)}");
+ 			GlobalArguments.Add($"--arch={ISPCArch}");
+ 			GlobalArguments.Add($"--target={TargetString}");
+ 			GlobalArguments.Add($"--emit-{GetISPCObjectFileFormat(CompileEnvironment.Platform)}");
+@@ -784,7 +784,7 @@
+ 				CompileAction.bCanExecuteRemotely = true;
+ 				CompileAction.bCanExecuteInUBACrossArchitecture = false;
+ 
+-				if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
++				if (RuntimeInformation.ProcessArchitecture == Architecture.Arm64 || (!OperatingSystem.IsWindows() && UEBuildPlatform.IsPlatformInGroup(CompileEnvironment.Platform, UnrealPlatformGroup.Windows)))
+ 				{
+ 					CompileAction.bCanExecuteInUBA = false;
+ 				}
+
