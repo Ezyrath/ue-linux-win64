@@ -428,7 +428,15 @@
  				// Apply the target settings for the resources
 --- a/Engine/Source/Developer/Windows/WindowsTargetPlatformSettings/Public/GenericWindowsTargetPlatformSettings.h
 +++ b/Engine/Source/Developer/Windows/WindowsTargetPlatformSettings/Public/GenericWindowsTargetPlatformSettings.h
-@@ -118,21 +118,24 @@
+@@ -4,6 +4,7 @@
+ 
+ #include "CoreMinimal.h"
+ #include "Common/TargetPlatformSettingsBase.h"
++#include "Windows/WindowsPlatformProperties.h"
+ #include "Misc/ConfigCacheIni.h"
+ #if WITH_ENGINE
+ 	#include "StaticMeshResources.h"
+@@ -118,21 +119,24 @@
  		// no shaders needed for dedicated server target
  		if (!TProperties::IsServerOnly())
  		{
@@ -457,7 +465,7 @@
  		}
  	}
  
-@@ -174,6 +177,14 @@
+@@ -174,6 +178,14 @@
  			}
  		}
  
@@ -472,7 +480,7 @@
  		return OutFormats;
  	}
  
-@@ -205,9 +216,11 @@
+@@ -205,9 +217,11 @@
  			static const TArray<FName> CachedFormats = GetAllTargetedShaderFormatsInternal(RelevantSettings);
  			OutFormats = CachedFormats;
  
@@ -484,7 +492,7 @@
  		}
  	}
  
-@@ -238,7 +251,9 @@
+@@ -238,7 +252,9 @@
  
  	virtual void GetShaderFormatModuleHints(TArray<FName>& OutModuleNames) const override
  	{
@@ -606,16 +614,6 @@
  			// make a single simple descriptor with out a lot of processing or rules assembly creation
  			if (bCreateSimplifiedDescriptors)
  			{
---- a/Engine/Source/Developer/Windows/WindowsTargetPlatformSettings/Public/GenericWindowsTargetPlatformSettings.h
-+++ b/Engine/Source/Developer/Windows/WindowsTargetPlatformSettings/Public/GenericWindowsTargetPlatformSettings.h
-@@ -4,6 +4,7 @@
- 
- #include "CoreMinimal.h"
- #include "Common/TargetPlatformSettingsBase.h"
-+#include "Windows/WindowsPlatformProperties.h"
- #include "Misc/ConfigCacheIni.h"
- #if WITH_ENGINE
- 	#include "StaticMeshResources.h"
 --- a/Engine/Plugins/Media/WmfMedia/Source/WmfMedia/Public/WmfMediaHardwareVideoDecodingShaders.h
 +++ b/Engine/Plugins/Media/WmfMedia/Source/WmfMedia/Public/WmfMediaHardwareVideoDecodingShaders.h
 @@ -38,8 +38,7 @@
