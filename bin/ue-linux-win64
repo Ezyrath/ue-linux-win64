@@ -127,17 +127,24 @@ setup_sysroot() {
     local sysroot_dir="$1"
     local engine_dir="${2:-}"
 
-    if ! command -v xwin >/dev/null 2>&1; then
-        log_error "'xwin' is required to download the MSVC + Windows SDK sysroot."
-        log_error "Run inside 'nix develop' or install xwin (cargo install xwin)."
-        exit 1
-    fi
-
     mkdir -p "$sysroot_dir" "$DEFAULT_XWIN_CACHE"
 
     if [[ ! -d "$sysroot_dir/Windows Kits/10/Include" ]]; then
+        local xwin_bin=""
+        if command -v xwin >/dev/null 2>&1; then
+            xwin_bin="$(command -v xwin)"
+        else
+            for cand in /nix/store/*-xwin-*/bin/xwin; do
+                [[ -x "$cand" ]] && xwin_bin="$cand" && break
+            done
+        fi
+        if [[ -z "$xwin_bin" ]]; then
+            log_error "'xwin' is required to download the MSVC + Windows SDK sysroot."
+            log_error "Run inside 'nix develop' or install xwin (cargo install xwin)."
+            exit 1
+        fi
         log_info "Downloading and splatting MSVC + Windows 11 SDK sysroot into $sysroot_dir..."
-        xwin --accept-license --cache-dir "$DEFAULT_XWIN_CACHE" --arch x86_64 --sdk-version 10.0.22621 splat --preserve-ms-arch-notation --include-debug-libs --output "$sysroot_dir"
+        "$xwin_bin" --accept-license --cache-dir "$DEFAULT_XWIN_CACHE" --arch x86_64 --sdk-version 10.0.22621 splat --preserve-ms-arch-notation --include-debug-libs --output "$sysroot_dir"
     else
         log_info "Existing xwin sysroot detected at $sysroot_dir."
     fi
@@ -191,6 +198,11 @@ setup_sysroot() {
     elif [[ -n "$bundled_gnu" && -x "$bundled_gnu/bin/llvm-rc" ]]; then
         llvm_rc_bin="$bundled_gnu/bin/llvm-rc"
     else
+        for cand in /nix/store/*-llvm-bin-20*/bin/llvm-rc /nix/store/*-llvm-20*/bin/llvm-rc /nix/store/*-llvm-*/bin/llvm-rc; do
+            [[ -x "$cand" ]] && llvm_rc_bin="$cand" && break
+        done
+    fi
+    if [[ -z "$llvm_rc_bin" ]]; then
         log_error "Could not find llvm-rc."
         exit 1
     fi
@@ -199,14 +211,20 @@ setup_sysroot() {
     if command -v llvm-mt >/dev/null 2>&1; then
         llvm_mt_bin="$(command -v llvm-mt)"
     else
-        llvm_mt_bin="$(command -v true)"
+        for cand in /nix/store/*-llvm-bin-20*/bin/llvm-mt /nix/store/*-llvm-20*/bin/llvm-mt; do
+            [[ -x "$cand" ]] && llvm_mt_bin="$cand" && break
+        done
+        [[ -z "$llvm_mt_bin" ]] && llvm_mt_bin="$(command -v true)"
     fi
 
     local llvm_cvtres_bin=""
     if command -v llvm-cvtres >/dev/null 2>&1; then
         llvm_cvtres_bin="$(command -v llvm-cvtres)"
     else
-        llvm_cvtres_bin="$lld_link_bin"
+        for cand in /nix/store/*-llvm-bin-20*/bin/llvm-cvtres /nix/store/*-llvm-20*/bin/llvm-cvtres; do
+            [[ -x "$cand" ]] && llvm_cvtres_bin="$cand" && break
+        done
+        [[ -z "$llvm_cvtres_bin" ]] && llvm_cvtres_bin="$lld_link_bin"
     fi
 
     # 3. Populate MSVC Hostx64/x64 & LLVM symlinks in sysroot
@@ -248,7 +266,7 @@ setup_sysroot() {
     ln -sfn "$llvm_mt_bin" "$kits_dir/bin/10.0.22621/x64/mt.exe"
     ln -sfn "$clang_bin" "$kits_dir/bin/10.0.22621/x64/clang-cl"
 
-    log_info "Creating case-insensitive .lib symlinks in Windows SDK..."
+    log_info "Creating case-insensitive .lib and .h symlinks in Windows SDK..."
     for libdir in "$kits_dir/Lib/10.0.22621/um/x64" "$kits_dir/Lib/10.0.22621/ucrt/x64" "$msvc_dir/lib/x64"; do
         [[ -d "$libdir" ]] || continue
         pushd "$libdir" >/dev/null
@@ -262,10 +280,108 @@ setup_sysroot() {
             [[ "$f" != "$upper" && ! -e "$upper" ]] && ln -s "$f" "$upper" || true
             [[ "$f" != "$cap" && ! -e "$cap" ]] && ln -s "$f" "$cap" || true
         done
+        for camel_lib in ImageHlp.lib PowrProf.lib UxTheme.lib WinHttp.lib XInput.lib; do
+            local lower_lib="${camel_lib,,}"
+            [[ -e "$lower_lib" && ! -e "$camel_lib" ]] && ln -s "$lower_lib" "$camel_lib" || true
+        done
+        popd >/dev/null
+    done
+
+    for incdir in "$kits_dir/Include/10.0.22621/um" "$kits_dir/Include/10.0.22621/shared" "$kits_dir/Include/10.0.22621/ucrt" "$kits_dir/Include/10.0.22621/winrt" "$msvc_dir/include"; do
+        [[ -d "$incdir" ]] || continue
+        pushd "$incdir" >/dev/null
+        for f in *.h *.H; do
+            [[ -e "$f" ]] || continue
+            local lower="${f,,}"
+            local base="${lower%.h}"
+            local cap="${base^}.h"
+            [[ "$f" != "$lower" && ! -e "$lower" ]] && ln -s "$f" "$lower" || true
+            [[ "$f" != "$cap" && ! -e "$cap" ]] && ln -s "$f" "$cap" || true
+        done
+        for camel_hdr in \
+            D3D9.h D3D11.h D3D11shader.h d3d11Shader.h D3D12.h D3D12Shader.h \
+            D3DCompiler.h D3Dcompiler.h D3Dcommon.h DXGI.h DXGIDebug.h DXGIFormat.h \
+            DelayIMP.h HttpTrace.h IO.h IPHlpApi.h LMStats.h MemoryApi.h ObjBase.h \
+            RTSCom.h SDKDDKVer.h ShellAPI.h USBSpec.h VarArgs.h WRL.h WebSocket.h \
+            WinCon.h WinHttp.h WinSock.h XInput.h \
+            windows.graphics.directX.direct3d11.h windows.graphics.directX.direct3d11.interop.h; do
+            local lower_hdr="${camel_hdr,,}"
+            [[ -e "$lower_hdr" && ! -e "$camel_hdr" ]] && ln -s "$lower_hdr" "$camel_hdr" || true
+        done
         popd >/dev/null
     done
 
     log_ok "Sysroot ready at $sysroot_dir"
+}
+
+setup_engine_thirdparty_symlinks() {
+    local engine_dir="$1"
+    log_info "Configuring case-insensitive symlinks in Engine/Source/ThirdParty..."
+    while IFS= read -r -d '' dir; do
+        local parent
+        parent="$(dirname "$dir")"
+        local base
+        base="$(basename "$dir")"
+        local lower="${base,,}"
+        local upper="${base^^}"
+        local cap="${lower^}"
+        [[ "$base" != "$lower" && ! -e "$parent/$lower" ]] && ln -s "$base" "$parent/$lower" || true
+        [[ "$base" != "$upper" && ! -e "$parent/$upper" ]] && ln -s "$base" "$parent/$upper" || true
+        [[ "$base" != "$cap" && ! -e "$parent/$cap" ]] && ln -s "$base" "$parent/$cap" || true
+    done < <(find "$engine_dir/Engine/Source/ThirdParty" -maxdepth 7 -type d \( -iname "include" -o -iname "lib" -o -iname "win64" -o -iname "vs20*" -o -iname "x64" \) -print0)
+
+    for tp_inc in \
+        "$engine_dir/Engine/Source/ThirdParty/Windows/DirectX/Include" \
+        "$engine_dir/Engine/Source/ThirdParty/Windows/D3DX12/Include" \
+        "$engine_dir/Engine/Source/ThirdParty/Windows/DirectXLegacy/Include" \
+        "$engine_dir/Engine/Source/ThirdParty/Windows/AgilitySDK/1.618.5/Include" \
+        "$engine_dir/Engine/Source/ThirdParty/DirectShow/DirectShow-1.0.0/src/Public" \
+        "$engine_dir/Engine/Source/ThirdParty/NVIDIA/NVaftermath/include"; do
+        [[ -d "$tp_inc" ]] || continue
+        pushd "$tp_inc" >/dev/null
+        for f in *.h *.hpp *.inl; do
+            [[ -e "$f" ]] || continue
+            local lower="${f,,}"
+            local base="${lower%.*}"
+            local ext="${lower##*.}"
+            local cap="${base^}.${ext}"
+            [[ "$f" != "$lower" && ! -e "$lower" ]] && ln -s "$f" "$lower" || true
+            [[ "$f" != "$cap" && ! -e "$cap" ]] && ln -s "$f" "$cap" || true
+        done
+        [[ -e "d3dx12residency.h" && ! -e "D3DX12Residency.h" ]] && ln -s "d3dx12residency.h" "D3DX12Residency.h" || true
+        [[ -e "GFSDK_Aftermath_GpuCrashDump.h" && ! -e "GFSDK_Aftermath_GpuCrashdump.h" ]] && ln -s "GFSDK_Aftermath_GpuCrashDump.h" "GFSDK_Aftermath_GpuCrashdump.h" || true
+        [[ -e "D3D11Shader.h" && ! -e "d3d11Shader.h" ]] && ln -s "D3D11Shader.h" "d3d11Shader.h" || true
+        [[ -e "D3D11Shader.h" && ! -e "D3D11shader.h" ]] && ln -s "D3D11Shader.h" "D3D11shader.h" || true
+        [[ -e "D3Dcompiler.h" && ! -e "D3DCompiler.h" ]] && ln -s "D3Dcompiler.h" "D3DCompiler.h" || true
+        [[ -e "DxErr.h" && ! -e "DXErr.h" ]] && ln -s "DxErr.h" "DXErr.h" || true
+        [[ -e "dxgidebug.h" && ! -e "DXGIDebug.h" ]] && ln -s "dxgidebug.h" "DXGIDebug.h" || true
+        popd >/dev/null
+    done
+
+    for tp_lib in \
+        "$engine_dir/Engine/Source/ThirdParty/Windows/DirectX/Lib/x64" \
+        "$engine_dir/Engine/Source/ThirdParty/Windows/DirectX/Lib/arm64" \
+        "$engine_dir/Engine/Source/ThirdParty/Windows/DirectXLegacy/Lib/x64" \
+        "$engine_dir/Engine/Source/ThirdParty/Windows/DirectXLegacy/Lib/x86" \
+        "$engine_dir/Engine/Source/ThirdParty/RawPDB/bin/Win64"; do
+        [[ -d "$tp_lib" ]] || continue
+        pushd "$tp_lib" >/dev/null
+        for f in *.lib *.Lib *.LIB; do
+            [[ -e "$f" ]] || continue
+            local lower="${f,,}"
+            local upper="${f^^}"
+            local base="${lower%.lib}"
+            local cap="${base^}.lib"
+            [[ "$f" != "$lower" && ! -e "$lower" ]] && ln -s "$f" "$lower" || true
+            [[ "$f" != "$upper" && ! -e "$upper" ]] && ln -s "$f" "$upper" || true
+            [[ "$f" != "$cap" && ! -e "$cap" ]] && ln -s "$f" "$cap" || true
+        done
+        [[ -e "d3d11.lib" && ! -e "D3D11.lib" ]] && ln -s "d3d11.lib" "D3D11.lib" || true
+        [[ -e "d3d12.lib" && ! -e "D3D12.lib" ]] && ln -s "d3d12.lib" "D3D12.lib" || true
+        [[ -e "dxgi.lib" && ! -e "DXGI.lib" ]] && ln -s "dxgi.lib" "DXGI.lib" || true
+        [[ -e "xinput.lib" && ! -e "XInput.lib" ]] && ln -s "xinput.lib" "XInput.lib" || true
+        popd >/dev/null
+    done
 }
 
 cmd_setup_engine() {
@@ -306,6 +422,7 @@ cmd_setup_engine() {
     fi
 
     setup_sysroot "$sysroot_dir" "$engine_dir"
+    setup_engine_thirdparty_symlinks "$engine_dir"
 
     log_info "Checking Unreal Engine 5.8 Linux->Win64 patch on $engine_dir..."
     pushd "$engine_dir" >/dev/null
@@ -330,6 +447,9 @@ cmd_setup_engine() {
         ./Engine/Build/BatchFiles/Linux/Build.sh BootstrapPackagedGame Win64 Shipping
 
         log_info "Building WindowsTargetPlatform modules for UnrealEditor (Linux Development)..."
+        # Remove UnrealEditor.version so UBT's WriteMetadata action regenerates UnrealEditor.modules
+        # with WindowsTargetPlatform, WindowsTargetPlatformSettings, and WindowsTargetPlatformControls.
+        rm -f Engine/Binaries/Linux/UnrealEditor.version
         ./Engine/Build/BatchFiles/Linux/Build.sh UnrealEditor Linux Development
         log_ok "Unreal Engine at $engine_dir is ready for Linux->Win64 cross-compilation!"
     fi
