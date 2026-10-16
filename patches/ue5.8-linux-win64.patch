@@ -494,7 +494,22 @@
  	}
 --- a/Engine/Source/Programs/Windows/BootstrapPackagedGame/Private/BootstrapPackagedGame.cpp
 +++ b/Engine/Source/Programs/Windows/BootstrapPackagedGame/Private/BootstrapPackagedGame.cpp
-@@ -528,10 +528,53 @@
+@@ -374,6 +374,14 @@
+ 			}
+ 			if (bInstallVCRedist)
+ 			{
++				HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
++				if (hNtdll != NULL && GetProcAddress(hNtdll, "wine_get_version") != NULL)
++				{
++					bInstallVCRedist = false;
++				}
++			}
++			if (bInstallVCRedist)
++			{
+ 				wcscat_s(MissingPrerequisites, TEXT("Microsoft Visual C++ 2015-2022 Redistributable "));
+ 				if (bIsARM64HostPlatform)
+ 				{
+@@ -528,10 +536,53 @@
  
  	// Get the executable to run
  	WCHAR* ExecFile = FindBestExecFile(hInstance, BaseDirectory);
@@ -599,3 +614,26 @@
  #include "Misc/ConfigCacheIni.h"
  #if WITH_ENGINE
  	#include "StaticMeshResources.h"
+--- a/Engine/Plugins/Media/WmfMedia/Source/WmfMedia/Public/WmfMediaHardwareVideoDecodingShaders.h
++++ b/Engine/Plugins/Media/WmfMedia/Source/WmfMedia/Public/WmfMediaHardwareVideoDecodingShaders.h
+@@ -38,8 +38,7 @@
+ 
+ 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+ 	{
+-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5)
+-			|| (IsPCPlatform(Parameters.Platform) && !IsOpenGLPlatform(Parameters.Platform)); // to support mobile emulation on PC
++		return IsD3DPlatform(Parameters.Platform);
+ 	}
+ 
+ 	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+--- a/Engine/Source/Runtime/Engine/Private/ShaderCompiler/ShaderCompiler.cpp
++++ b/Engine/Source/Runtime/Engine/Private/ShaderCompiler/ShaderCompiler.cpp
+@@ -4970,7 +4970,7 @@
+                             check(IsInGameThread());
+                             FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("NoGlobalShader_Error", "Missing shader permutation. Please make sure cooking was successful and refer to Engine log for details."));
+                         }
+-                            UE_LOGF(LogShaders, Fatal, "Missing global shader %ls's permutation %i, Please make sure cooking was successful.",
++                            UE_LOGF(LogShaders, Warning, "Missing global shader %ls's permutation %i (may be a Windows-only plugin shader skipped during cross-platform cooking).",
+                                 GlobalShaderType->GetName(), PermutationId);
+                     }
+ 					else

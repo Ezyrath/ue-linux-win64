@@ -492,6 +492,9 @@ DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan
 +TargetedRHIs=SF_VULKAN_SM5
 +VulkanTargetedShaderFormats=SF_VULKAN_SM6
 +VulkanTargetedShaderFormats=SF_VULKAN_SM5
+
+[SystemSettings]
+r.PSOPrecache.GlobalShaders=0
 EOF
     log_ok "Project $(basename "$uproject") configured for Linux->Win64!"
 }
