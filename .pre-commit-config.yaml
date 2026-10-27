@@ -1,0 +1,42 @@
+---
+repos:
+  # MegaLinter has no Nix support, so Nix files are checked here directly
+  - repo: local
+    hooks:
+      - id: alejandra
+        name: alejandra (format nix)
+        entry: nix run nixpkgs#alejandra --
+        language: system
+        types: [nix]
+        stages: [pre-commit]
+
+      - id: deadnix
+        name: deadnix (dead nix code)
+        entry: nix run nixpkgs#deadnix -- --fail
+        language: system
+        types: [nix]
+        stages: [pre-commit]
+
+      - id: statix
+        name: statix (nix lints)
+        entry: nix run nixpkgs#statix -- check .
+        language: system
+        files: \.nix$
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: nix-flake-check
+        name: nix flake check
+        entry: nix flake check
+        language: system
+        files: (\.nix|flake\.lock)$
+        pass_filenames: false
+        stages: [pre-commit]
+
+  - repo: https://github.com/oxsecurity/megalinter
+    rev: v10.1.0
+    hooks:
+      - id: megalinter-incremental
+        stages: [pre-commit]
+      - id: megalinter-full
+        stages: [manual]

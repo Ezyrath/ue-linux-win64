@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # bash completion for ue-linux-win64
 _ue_linux_win64() {
     local cur prev words cword
@@ -6,7 +7,7 @@ _ue_linux_win64() {
     local subcommands="setup-engine setup-project package status"
 
     if [[ $cword -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "$subcommands -h --help" -- "$cur") )
+        mapfile -t COMPREPLY < <(compgen -W "$subcommands -h --help" -- "$cur")
         return 0
     fi
 
@@ -14,7 +15,7 @@ _ue_linux_win64() {
     case "$cmd" in
         setup-engine)
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--sysroot --skip-build -h --help" -- "$cur") )
+                mapfile -t COMPREPLY < <(compgen -W "--sysroot --skip-build -h --help" -- "$cur")
             else
                 _filedir -d
             fi
@@ -25,7 +26,7 @@ _ue_linux_win64() {
         package)
             case "$prev" in
                 --config)
-                    COMPREPLY=( $(compgen -W "DebugGame Development Shipping" -- "$cur") )
+                    mapfile -t COMPREPLY < <(compgen -W "DebugGame Development Shipping" -- "$cur")
                     return 0
                     ;;
                 --engine|--output)
@@ -34,7 +35,7 @@ _ue_linux_win64() {
                     ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=( $(compgen -W "--engine --config --output -h --help" -- "$cur") )
+                mapfile -t COMPREPLY < <(compgen -W "--engine --config --output -h --help" -- "$cur")
             else
                 _filedir '@(uproject)'
             fi

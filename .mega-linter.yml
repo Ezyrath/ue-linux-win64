@@ -1,0 +1,9 @@
+---
+# Configuration for MegaLinter
+# https://megalinter.io/latest/configuration/
+
+DISABLE_LINTERS:
+  - ACTION_ZIZMOR
+  - COPYPASTE_JSCPD
+
+FILTER_REGEX_EXCLUDE: (patches/.*\.patch)

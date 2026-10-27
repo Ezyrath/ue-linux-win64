@@ -93,6 +93,43 @@ resolve_engine_from_uproject() {
     return 1
 }
 
+detect_engine_version() {
+    local engine_dir="$1"
+    local ver_file="$engine_dir/Engine/Build/Build.version"
+    if [[ ! -f "$ver_file" ]]; then
+        return 1
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '"\(.MajorVersion).\(.MinorVersion).\(.PatchVersion)"' "$ver_file" 2>/dev/null
+    else
+        local maj min pat
+        maj=$(grep -oP '"MajorVersion"\s*:\s*\K[0-9]+' "$ver_file" || true)
+        min=$(grep -oP '"MinorVersion"\s*:\s*\K[0-9]+' "$ver_file" || true)
+        pat=$(grep -oP '"PatchVersion"\s*:\s*\K[0-9]+' "$ver_file" || true)
+        [[ -n "$maj" && -n "$min" && -n "$pat" ]] && echo "${maj}.${min}.${pat}"
+    fi
+}
+
+resolve_patch_file() {
+    local engine_dir="$1"
+    local ver=""
+    ver=$(detect_engine_version "$engine_dir" 2>/dev/null || true)
+    if [[ -n "$ver" ]]; then
+        local exact_patch="$REPO_ROOT/patches/ue${ver}-linux-win64.patch"
+        if [[ -f "$exact_patch" ]]; then
+            echo "$exact_patch"
+            return 0
+        fi
+        local minor_ver="${ver%.*}"
+        local minor_patch="$REPO_ROOT/patches/ue${minor_ver}-linux-win64.patch"
+        if [[ -f "$minor_patch" ]]; then
+            echo "$minor_patch"
+            return 0
+        fi
+    fi
+    echo "$PATCH_FILE"
+}
+
 find_working_lld_link() {
     local engine_dir="${1:-}"
     local candidate
@@ -474,7 +511,7 @@ EOF
         if [[ ! -d "$wine_prefix/drive_c" ]]; then
             log_info "Initializing headless Wine prefix for ISPC at $wine_prefix..."
             mkdir -p "$wine_prefix"
-            WINEPREFIX="$wine_prefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" DISPLAY= WAYLAND_DISPLAY= "$wine_bin" wineboot -u >/dev/null 2>&1 || true
+            WINEPREFIX="$wine_prefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" DISPLAY="" WAYLAND_DISPLAY="" "$wine_bin" wineboot -u >/dev/null 2>&1 || true
         fi
     fi
 }
@@ -531,13 +568,18 @@ cmd_setup_engine() {
     setup_engine_thirdparty_symlinks "$engine_dir"
     setup_ispc_wrapper "$engine_dir"
 
-    log_info "Checking Unreal Engine 5.8 Linux->Win64 patch on $engine_dir..."
+    local active_patch
+    active_patch="$(resolve_patch_file "$engine_dir")"
+    local engine_ver
+    engine_ver="$(detect_engine_version "$engine_dir" 2>/dev/null || echo "5.8")"
+
+    log_info "Checking Unreal Engine $engine_ver Linux->Win64 patch ($(basename "$active_patch")) on $engine_dir..."
     pushd "$engine_dir" >/dev/null
-    if patch -p1 -R --dry-run -s < "$PATCH_FILE" >/dev/null 2>&1; then
+    if patch -p1 -R --dry-run -s < "$active_patch" >/dev/null 2>&1; then
         log_ok "Patch is already applied."
-    elif patch -p1 --dry-run -s < "$PATCH_FILE" >/dev/null 2>&1; then
-        log_info "Applying patch $PATCH_FILE..."
-        patch -p1 < "$PATCH_FILE"
+    elif patch -p1 --dry-run -s < "$active_patch" >/dev/null 2>&1; then
+        log_info "Applying patch $active_patch..."
+        patch -p1 < "$active_patch"
         log_ok "Patch applied successfully."
     else
         log_error "Patch could not be applied cleanly to $engine_dir."
@@ -733,11 +775,15 @@ cmd_status() {
     fi
 
     if [[ -n "$engine_dir" && -d "$engine_dir/Engine" ]]; then
-        echo "Engine Directory:    $engine_dir"
-        if (cd "$engine_dir" && patch -p1 -R --dry-run -s < "$PATCH_FILE" >/dev/null 2>&1); then
-            echo -e "Engine Source Patch: ${GREEN}Applied${NC}"
+        local engine_ver
+        engine_ver="$(detect_engine_version "$engine_dir" 2>/dev/null || echo "unknown")"
+        local active_patch
+        active_patch="$(resolve_patch_file "$engine_dir")"
+        echo "Engine Directory:    $engine_dir (UE $engine_ver)"
+        if (cd "$engine_dir" && patch -p1 -R --dry-run -s < "$active_patch" >/dev/null 2>&1); then
+            echo -e "Engine Source Patch: ${GREEN}Applied${NC} ($(basename "$active_patch"))"
         else
-            echo -e "Engine Source Patch: ${RED}Not Applied${NC}"
+            echo -e "Engine Source Patch: ${RED}Not Applied${NC} ($(basename "$active_patch"))"
         fi
         if [[ -f "$engine_dir/Engine/Source/ThirdParty/Intel/ISPC/bin/Linux/ispc.linux" ]]; then
             echo -e "ISPC Win64 Wrapper:  ${GREEN}Configured${NC}"

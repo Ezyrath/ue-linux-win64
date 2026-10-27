@@ -1,0 +1,49 @@
+name: Update Dependencies
+
+on:
+  schedule:
+    # Run every Monday at 04:00 UTC
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  update-dependencies:
+    name: Update Flake & Pre-commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Update flake inputs
+        run: nix flake update
+
+      - name: Update pre-commit hooks
+        run: nix run nixpkgs#pre-commit -- autoupdate
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(deps): update flake inputs and pre-commit hooks"
+          title: "chore(deps): weekly dependency updates"
+          body: |
+            Automated weekly update of dependencies:
+            - Flake inputs updated (`flake.lock`)
+            - Pre-commit hooks updated (`.pre-commit-config.yaml`)
+
+            The CI test workflow will run automatically on this PR.
+          branch: automated/deps-update
+          delete-branch: true
