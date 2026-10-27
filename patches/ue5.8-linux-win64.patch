@@ -35,9 +35,7 @@
  			if (Platform == UnrealTargetPlatform.Win64)
  			{
  				Target.WindowsPlatform.Architecture = Target.Architecture;
-@@ -1477,9 +1485,9 @@
- 				}
- 			}
+@@ -1477,7 +1485,7 @@
  
  			Target.bCompileISPC = true;
  
