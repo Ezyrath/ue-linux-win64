@@ -12,13 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
       - name: Install Nix
         uses: cachix/install-nix-action@v30
@@ -27,23 +24,41 @@ jobs:
             experimental-features = nix-command flakes
             accept-flake-config = true
 
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
       - name: Update flake inputs
         run: nix flake update
 
       - name: Update pre-commit hooks
         run: nix run nixpkgs#pre-commit -- autoupdate
 
-      - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v7
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore(deps): update flake inputs and pre-commit hooks"
-          title: "chore(deps): weekly dependency updates"
-          body: |
-            Automated weekly update of dependencies:
-            - Flake inputs updated (`flake.lock`)
-            - Pre-commit hooks updated (`.pre-commit-config.yaml`)
+      - name: Check for changes
+        id: changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
 
-            The CI test workflow will run automatically on this PR.
-          branch: automated/deps-update
-          delete-branch: true
+      - name: Verify Flake & Build before pushing
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          nix run nixpkgs#alejandra -- --check .
+          nix run nixpkgs#statix -- check .
+          nix run nixpkgs#deadnix -- --fail .
+          nix flake check
+          nix build .#default --no-link
+          nix run .#default -- --help
+          nix run .#default -- status
+
+      - name: Commit and push updates to main
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add flake.lock .pre-commit-config.yaml
+          git commit -m "chore(deps): update flake inputs and pre-commit hooks"
+          git pull --rebase origin main
+          git push origin HEAD:main
