@@ -34,7 +34,7 @@ repos:
         stages: [pre-commit]
 
   - repo: https://github.com/oxsecurity/megalinter
-    rev: v10.1.0
+    rev: v10.2.0
     hooks:
       - id: megalinter-incremental
         stages: [pre-commit]
