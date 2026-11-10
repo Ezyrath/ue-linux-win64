@@ -36,7 +36,7 @@ Commands:
 
   setup-project [project_dir_or_uproject]
       Configures Config/DefaultEngine.ini for Linux->Win64 cross-compilation
-      (Compiler=Clang, DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan, Vulkan SM5/SM6 shaders).
+      (DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan, Vulkan SM5/SM6 shaders).
 
   package [project_dir_or_uproject] [options] [-- <extra_uat_args>...]
       Cross-compiles, cooks (Vulkan SM5/SM6), stages, and packages a Windows (Win64) build from Linux.
@@ -649,7 +649,7 @@ cmd_setup_project() {
     touch "$engine_ini"
 
     if grep -q "^\[/Script/WindowsTargetPlatform\.WindowsTargetSettings\]" "$engine_ini" 2>/dev/null; then
-        if grep -q "DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan" "$engine_ini" 2>/dev/null && grep -q "Compiler=Clang" "$engine_ini" 2>/dev/null; then
+        if grep -q "DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan" "$engine_ini" 2>/dev/null; then
             if ! grep -q "r.PSOPrecache.GlobalShaders=0" "$engine_ini" 2>/dev/null; then
                 cat >> "$engine_ini" << 'EOF'
 
@@ -666,7 +666,6 @@ EOF
     cat >> "$engine_ini" << 'EOF'
 
 [/Script/WindowsTargetPlatform.WindowsTargetSettings]
-Compiler=Clang
 DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan
 -D3D12TargetedShaderFormats=PCD3D_SM6
 -D3D12TargetedShaderFormats=PCD3D_SM5
