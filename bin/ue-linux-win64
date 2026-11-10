@@ -7,6 +7,7 @@ PATCH_FILE="$REPO_ROOT/patches/ue5.8-linux-win64.patch"
 
 DEFAULT_SYSROOT="${UE_WIN64_SYSROOT:-$HOME/.local/share/ue-linux-win64/sysroot}"
 DEFAULT_XWIN_CACHE="${UE_WIN64_XWIN_CACHE:-$HOME/.local/share/ue-linux-win64/xwin-cache}"
+WIN_SDK_VERSION="${UE_WIN64_SDK_VERSION:-10.0.26100}"
 INSTALL_INI="$HOME/.config/Epic/UnrealEngine/Install.ini"
 
 GREEN='\033[0;32m'
@@ -181,7 +182,7 @@ setup_sysroot() {
             exit 1
         fi
         log_info "Downloading and splatting MSVC + Windows 11 SDK sysroot into $sysroot_dir..."
-        "$xwin_bin" --accept-license --cache-dir "$DEFAULT_XWIN_CACHE" --arch x86_64 --sdk-version 10.0.22621 splat --preserve-ms-arch-notation --include-debug-libs --output "$sysroot_dir"
+        "$xwin_bin" --accept-license --cache-dir "$DEFAULT_XWIN_CACHE" --arch x86_64 --sdk-version "${WIN_SDK_VERSION}" splat --use-winsysroot-style --preserve-ms-arch-notation --include-debug-libs --output "$sysroot_dir"
     else
         log_info "Existing xwin sysroot detected at $sysroot_dir."
     fi
@@ -269,10 +270,23 @@ setup_sysroot() {
     ln -sfn "$lld_link_bin" "$msvc_dir/bin/Hostx64/x64/link.exe"
     ln -sfn "$llvm_cvtres_bin" "$msvc_dir/bin/Hostx64/x64/cvtres.exe"
 
-    mkdir -p "$sysroot_dir/LLVM/20.1.8/bin" "$sysroot_dir/LLVM/20.1.8/lib/clang/20/lib"
-    ln -sfn "$clang_bin" "$sysroot_dir/LLVM/20.1.8/bin/clang-cl.exe"
-    ln -sfn "$lld_link_bin" "$sysroot_dir/LLVM/20.1.8/bin/lld-link.exe"
-    ln -sfn "$msvc_dir/lib/x64" "$sysroot_dir/LLVM/20.1.8/lib/clang/20/lib/windows"
+    # Detect the real clang version instead of assuming Epic's bundled clang 20
+    # (UE 5.9 source builds may use the system clang, e.g. 23.x).
+    local clang_full clang_major clang_resdir
+    clang_full=$("$clang_bin" --version | grep -oP 'version \K[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+    clang_full="${clang_full:-20.1.8}"
+    clang_major="${clang_full%%.*}"
+    clang_resdir=$("$clang_bin" -print-resource-dir 2>/dev/null || true)
+    log_info "Using clang $clang_full ($clang_bin)"
+
+    local llvm_dir="$sysroot_dir/LLVM/$clang_full"
+    mkdir -p "$llvm_dir/bin" "$llvm_dir/lib/clang/$clang_major/lib"
+    ln -sfn "$clang_bin" "$llvm_dir/bin/clang-cl.exe"
+    ln -sfn "$lld_link_bin" "$llvm_dir/bin/lld-link.exe"
+    ln -sfn "$msvc_dir/lib/x64" "$llvm_dir/lib/clang/$clang_major/lib/windows"
+    if [[ -n "$clang_resdir" && -d "$clang_resdir/include" ]]; then
+        ln -sfn "$clang_resdir/include" "$llvm_dir/lib/clang/$clang_major/include"
+    fi
 
     if [[ -n "$bundled_gnu" ]]; then
         ln -sfn "$clang_bin" "$bundled_gnu/bin/clang-cl.exe"
@@ -280,30 +294,38 @@ setup_sysroot() {
         if [[ -d "$bundled_gnu/lib/clang/20" ]]; then
             mkdir -p "$bundled_gnu/lib/clang/20/lib"
             ln -sfn "$msvc_dir/lib/x64" "$bundled_gnu/lib/clang/20/lib/windows"
-            ln -sfn "$bundled_gnu/lib/clang/20/include" "$sysroot_dir/LLVM/20.1.8/lib/clang/20/include"
+            ln -sfn "$bundled_gnu/lib/clang/20/include" "$llvm_dir/lib/clang/$clang_major/include"
         fi
     fi
 
     # 4. Configure Windows Kits/10 symlinks & case-folding .lib links
     local kits_dir="$sysroot_dir/Windows Kits/10"
-    ln -sfn Include "$kits_dir/include"
-    ln -sfn Lib "$kits_dir/lib"
-    if [[ -d "$kits_dir/Include/10.0.22621" && ! -e "$kits_dir/Include/10.0.22621.0" ]]; then
-        ln -sfn 10.0.22621 "$kits_dir/Include/10.0.22621.0"
+    # Recent xwin (--use-winsysroot-style) emits lowercase include/lib; UBT expects Include/Lib.
+    local d
+    for d in Include Lib; do
+        local lower="${d,,}"
+        if [[ -d "$kits_dir/$lower" && ! -L "$kits_dir/$lower" && ! -e "$kits_dir/$d" ]]; then
+            rm -f "$kits_dir/$lower/$d"
+            mv "$kits_dir/$lower" "$kits_dir/$d"
+        fi
+        [[ -e "$kits_dir/$lower" ]] || ln -sfn "$d" "$kits_dir/$lower"
+    done
+    if [[ -d "$kits_dir/Include/${WIN_SDK_VERSION}" && ! -e "$kits_dir/Include/${WIN_SDK_VERSION}.0" ]]; then
+        ln -sfn ${WIN_SDK_VERSION} "$kits_dir/Include/${WIN_SDK_VERSION}.0"
     fi
-    if [[ -d "$kits_dir/Lib/10.0.22621" && ! -e "$kits_dir/Lib/10.0.22621.0" ]]; then
-        ln -sfn 10.0.22621 "$kits_dir/Lib/10.0.22621.0"
+    if [[ -d "$kits_dir/Lib/${WIN_SDK_VERSION}" && ! -e "$kits_dir/Lib/${WIN_SDK_VERSION}.0" ]]; then
+        ln -sfn ${WIN_SDK_VERSION} "$kits_dir/Lib/${WIN_SDK_VERSION}.0"
     fi
 
-    mkdir -p "$kits_dir/bin/10.0.22621.0/x64" "$kits_dir/bin/10.0.22621/x64"
-    for rc_dir in "$kits_dir/bin/10.0.22621.0/x64" "$kits_dir/bin/10.0.22621/x64"; do
+    mkdir -p "$kits_dir/bin/${WIN_SDK_VERSION}.0/x64" "$kits_dir/bin/${WIN_SDK_VERSION}/x64"
+    for rc_dir in "$kits_dir/bin/${WIN_SDK_VERSION}.0/x64" "$kits_dir/bin/${WIN_SDK_VERSION}/x64"; do
         ln -sfn "$llvm_rc_bin" "$rc_dir/rc.exe"
         ln -sfn "$llvm_mt_bin" "$rc_dir/mt.exe"
         ln -sfn "$clang_bin" "$rc_dir/clang-cl"
     done
 
     log_info "Creating case-insensitive .lib and .h symlinks in Windows SDK..."
-    for libdir in "$kits_dir/Lib/10.0.22621/um/x64" "$kits_dir/Lib/10.0.22621/ucrt/x64" "$msvc_dir/lib/x64"; do
+    for libdir in "$kits_dir/Lib/${WIN_SDK_VERSION}/um/x64" "$kits_dir/Lib/${WIN_SDK_VERSION}/ucrt/x64" "$msvc_dir/lib/x64"; do
         [[ -d "$libdir" ]] || continue
         pushd "$libdir" >/dev/null
         for f in *.lib *.Lib *.LIB; do
@@ -323,7 +345,7 @@ setup_sysroot() {
         popd >/dev/null
     done
 
-    for incdir in "$kits_dir/Include/10.0.22621/um" "$kits_dir/Include/10.0.22621/shared" "$kits_dir/Include/10.0.22621/ucrt" "$kits_dir/Include/10.0.22621/winrt" "$msvc_dir/include"; do
+    for incdir in "$kits_dir/Include/${WIN_SDK_VERSION}/um" "$kits_dir/Include/${WIN_SDK_VERSION}/shared" "$kits_dir/Include/${WIN_SDK_VERSION}/ucrt" "$kits_dir/Include/${WIN_SDK_VERSION}/winrt" "$msvc_dir/include"; do
         [[ -d "$incdir" ]] || continue
         pushd "$incdir" >/dev/null
         for f in *.h *.H; do
@@ -370,7 +392,7 @@ setup_engine_thirdparty_symlinks() {
         "$engine_dir/Engine/Source/ThirdParty/Windows/DirectX/Include" \
         "$engine_dir/Engine/Source/ThirdParty/Windows/D3DX12/Include" \
         "$engine_dir/Engine/Source/ThirdParty/Windows/DirectXLegacy/Include" \
-        "$engine_dir/Engine/Source/ThirdParty/Windows/AgilitySDK/1.618.5/Include" \
+        "$engine_dir"/Engine/Source/ThirdParty/Windows/AgilitySDK/*/Include \
         "$engine_dir/Engine/Source/ThirdParty/DirectShow/DirectShow-1.0.0/src/Public" \
         "$engine_dir/Engine/Source/ThirdParty/NVIDIA/NVaftermath/include"; do
         [[ -d "$tp_inc" ]] || continue
