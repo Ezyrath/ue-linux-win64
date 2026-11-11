@@ -1,6 +1,6 @@
 # ue-linux-win64
 
-Cross-compile and package **Unreal Engine 5.8 and 5.9** C++ and Blueprint projects from **Linux (`x86_64-linux`) to Windows (`Win64`)** using `clang-cl`, `lld-link`, `llvm-rc`, and `xwin` (MSVC + Windows 11 SDK sysroot) with **Vulkan SM5/SM6** shaders and **Intel ISPC** SIMD acceleration (`SSE4`, `AVX`, `AVX2`, `AVX-512`).
+Cross-compile and package **Unreal Engine 5.8** (and experimental **5.9-preview**) C++ and Blueprint projects from **Linux (`x86_64-linux`) to Windows (`Win64`)** using `clang-cl`, `lld-link`, `llvm-rc`, and `xwin` (MSVC + Windows 11 SDK sysroot) with **Vulkan SM5/SM6** shaders and **Intel ISPC** SIMD acceleration (`SSE4`, `AVX`, `AVX2`, `AVX-512`).
 
 No Windows VM or Visual Studio installation required — works both from the CLI and directly inside the **Linux Unreal Editor UI** (`Edit -> Project Settings -> Platforms -> Windows` and `Platforms -> Windows -> Package Project`).
 
@@ -23,10 +23,15 @@ This repository provides:
 
 ---
 
-## Unreal Engine 5.9 support
+## Unreal Engine 5.9 (Preview / Experimental)
+
+> [!NOTE]
+> **Support Policy — Stable vs. Preview Releases**
+> - **Stable releases (`5.8.x`)**: Actively maintained and directly tested by the maintainer.
+> - **Preview releases (`5.9-preview`)**: Provided on an **experimental, best-effort basis** without guarantee (early community rebase, not directly validated by the maintainer, and subject to upstream changes until Epic's final stable release).
 
 `patches/ue5.9-linux-win64.patch` is selected automatically when `Engine/Build/Build.version` reports 5.9
-(tested on the `5.9.0-preview-1` tag). Differences handled by the CLI for 5.9:
+(community-tested on the `5.9.0-preview-1` tag). Differences handled by the CLI for 5.9:
 
 - **Windows SDK 10.0.26100** is used for the `xwin` sysroot when a 5.9 engine is detected (5.8 keeps `10.0.22621`).
   Both SDK versions can coexist side-by-side in the shared sysroot (`~/.local/share/ue-linux-win64/sysroot`). Override with `UE_WIN64_SDK_VERSION`.
