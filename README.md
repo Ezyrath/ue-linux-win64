@@ -17,7 +17,7 @@ Out of the box, Unreal Engine on Linux disables the `Win64` target platform beca
 6. `BootstrapPackagedGame` (`<Project>.exe` root launcher) relies on Win32 `UpdateResourceW` during staging on Windows hosts; on Linux hosts we add a fallback that automatically discovers `<Project>\Binaries\Win64\<Project>*.exe`.
 
 This repository provides:
-- [`patches/ue5.8-linux-win64.patch`](patches/ue5.8-linux-win64.patch) & [`patches/ue5.9-linux-win64.patch`](patches/ue5.9-linux-win64.patch): Clean unified patches (`patch -p1`) for Unreal Engine 5.8.x and 5.9.x source builds.
+- [`patches/ue5.8-linux-win64.patch`](patches/ue5.8-linux-win64.patch) & [`patches/ue5.9-linux-win64.patch`](patches/ue5.9-linux-win64.patch): Clean unified patches (`patch -p1`) for Unreal Engine 5.8.x (and experimental 5.9-preview) source builds.
 - [`bin/ue-linux-win64`](bin/ue-linux-win64): A standalone CLI tool to download/configure the `xwin` sysroot, configure the hybrid ISPC wrapper, patch & compile the engine modules, configure projects, and package `Win64` builds from Linux.
 - [`flake.nix`](flake.nix): Reproducible Nix package & devShell with `xwin`, `clang-20`, `lld-20` (with `libxml2` manifest embedding support), `llvm-rc`, and `wine64`.
 
@@ -44,14 +44,14 @@ This repository provides:
   on Linux hosts, and setting it per project changes warnings for *every* target (including the Linux editor)
   and forces a full rebuild of shared engine binaries.
 
-Validated on 5.9: a Development test project and a Shipping C++ game (Paper2D/PaperZD, Enhanced Input, localization)
+Community-tested on `5.9.0-preview-1` (PR #2): a Development test project and a Shipping C++ game (Paper2D/PaperZD, Enhanced Input, localization)
 packaged from Linux, running under Wine and on a real Windows 11 PC.
 
 ---
 
 ## Quick Start
 
-### 1. Prepare your Unreal Engine 5.8 or 5.9 source build (one-time per engine version)
+### 1. Prepare your Unreal Engine 5.8 (or experimental 5.9-preview) source build (one-time per engine version)
 
 ```bash
 ue-linux-win64 setup-engine /path/to/UnrealEngine
