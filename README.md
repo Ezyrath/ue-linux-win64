@@ -1,6 +1,6 @@
 # ue-linux-win64
 
-Cross-compile and package **Unreal Engine 5.8** C++ and Blueprint projects from **Linux (`x86_64-linux`) to Windows (`Win64`)** using `clang-cl`, `lld-link`, `llvm-rc`, and `xwin` (MSVC + Windows 11 SDK sysroot) with **Vulkan SM5/SM6** shaders and **Intel ISPC** SIMD acceleration (`SSE4`, `AVX`, `AVX2`, `AVX-512`).
+Cross-compile and package **Unreal Engine 5.8 and 5.9** C++ and Blueprint projects from **Linux (`x86_64-linux`) to Windows (`Win64`)** using `clang-cl`, `lld-link`, `llvm-rc`, and `xwin` (MSVC + Windows 11 SDK sysroot) with **Vulkan SM5/SM6** shaders and **Intel ISPC** SIMD acceleration (`SSE4`, `AVX`, `AVX2`, `AVX-512`).
 
 No Windows VM or Visual Studio installation required — works both from the CLI and directly inside the **Linux Unreal Editor UI** (`Edit -> Project Settings -> Platforms -> Windows` and `Platforms -> Windows -> Package Project`).
 
@@ -20,6 +20,27 @@ This repository provides:
 - [`patches/ue5.8-linux-win64.patch`](patches/ue5.8-linux-win64.patch): A clean unified patch (`patch -p1`) for Unreal Engine 5.8.x source builds.
 - [`bin/ue-linux-win64`](bin/ue-linux-win64): A standalone CLI tool to download/configure the `xwin` sysroot, configure the hybrid ISPC wrapper, patch & compile the engine modules, configure projects, and package `Win64` builds from Linux.
 - [`flake.nix`](flake.nix): Reproducible Nix package & devShell with `xwin`, `clang-20`, `lld-20` (with `libxml2` manifest embedding support), `llvm-rc`, and `wine64`.
+
+---
+
+## Unreal Engine 5.9 support
+
+`patches/ue5.9-linux-win64.patch` is selected automatically when `Engine/Build/Build.version` reports 5.9
+(tested on the `5.9.0-preview-1` tag). Differences handled by the CLI for 5.9:
+
+- **Windows SDK 10.0.26100** is used for the `xwin` sysroot when a 5.9 engine is detected (5.8 keeps 10.0.22621).
+  Override with `UE_WIN64_SDK_VERSION`. The sysroot is shared: if you switch SDK, delete it so it is re-downloaded.
+- Recent `xwin` releases need `--use-winsysroot-style`; the lowercase `include`/`lib` folders it creates are
+  renamed to `Include`/`Lib` as UBT expects.
+- The **actual clang version** is detected (UE 5.9 source builds can use the system clang, e.g. 23.x) instead of
+  assuming the bundled clang 20.1.8.
+- The AgilitySDK include folder is globbed instead of hard-coding `1.618.5`.
+- `setup-project` no longer writes `Compiler=Clang` to the project: the engine patch already forces Clang for Win64
+  on Linux hosts, and setting it per project changes warnings for *every* target (including the Linux editor)
+  and forces a full rebuild of shared engine binaries.
+
+Validated on 5.9: a Development test project and a Shipping C++ game (Paper2D/PaperZD, Enhanced Input, localization)
+packaged from Linux, running under Wine and on a real Windows 11 PC.
 
 ---
 

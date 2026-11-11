@@ -7,7 +7,9 @@ PATCH_FILE="$REPO_ROOT/patches/ue5.8-linux-win64.patch"
 
 DEFAULT_SYSROOT="${UE_WIN64_SYSROOT:-$HOME/.local/share/ue-linux-win64/sysroot}"
 DEFAULT_XWIN_CACHE="${UE_WIN64_XWIN_CACHE:-$HOME/.local/share/ue-linux-win64/xwin-cache}"
-WIN_SDK_VERSION="${UE_WIN64_SDK_VERSION:-10.0.26100}"
+# Windows SDK used for the xwin sysroot. Empty = chosen from the engine version in setup_sysroot
+# (UE 5.9+ -> 10.0.26100, older -> 10.0.22621). Override with UE_WIN64_SDK_VERSION.
+WIN_SDK_VERSION="${UE_WIN64_SDK_VERSION:-}"
 INSTALL_INI="$HOME/.config/Epic/UnrealEngine/Install.ini"
 
 GREEN='\033[0;32m'
@@ -164,6 +166,14 @@ find_working_lld_link() {
 setup_sysroot() {
     local sysroot_dir="$1"
     local engine_dir="${2:-}"
+
+    if [[ -z "$WIN_SDK_VERSION" ]]; then
+        local ue_ver="" ue_minor=0
+        [[ -n "$engine_dir" ]] && ue_ver=$(detect_engine_version "$engine_dir" 2>/dev/null || true)
+        if [[ "$ue_ver" =~ ^5\.([0-9]+) ]]; then ue_minor="${BASH_REMATCH[1]}"; fi
+        if (( ue_minor >= 9 )); then WIN_SDK_VERSION="10.0.26100"; else WIN_SDK_VERSION="10.0.22621"; fi
+    fi
+    log_info "Windows SDK version for the sysroot: $WIN_SDK_VERSION"
 
     mkdir -p "$sysroot_dir" "$DEFAULT_XWIN_CACHE"
 
