@@ -17,7 +17,7 @@ Out of the box, Unreal Engine on Linux disables the `Win64` target platform beca
 6. `BootstrapPackagedGame` (`<Project>.exe` root launcher) relies on Win32 `UpdateResourceW` during staging on Windows hosts; on Linux hosts we add a fallback that automatically discovers `<Project>\Binaries\Win64\<Project>*.exe`.
 
 This repository provides:
-- [`patches/ue5.8-linux-win64.patch`](patches/ue5.8-linux-win64.patch): A clean unified patch (`patch -p1`) for Unreal Engine 5.8.x source builds.
+- [`patches/ue5.8-linux-win64.patch`](patches/ue5.8-linux-win64.patch) & [`patches/ue5.9-linux-win64.patch`](patches/ue5.9-linux-win64.patch): Clean unified patches (`patch -p1`) for Unreal Engine 5.8.x and 5.9.x source builds.
 - [`bin/ue-linux-win64`](bin/ue-linux-win64): A standalone CLI tool to download/configure the `xwin` sysroot, configure the hybrid ISPC wrapper, patch & compile the engine modules, configure projects, and package `Win64` builds from Linux.
 - [`flake.nix`](flake.nix): Reproducible Nix package & devShell with `xwin`, `clang-20`, `lld-20` (with `libxml2` manifest embedding support), `llvm-rc`, and `wine64`.
 
@@ -28,8 +28,8 @@ This repository provides:
 `patches/ue5.9-linux-win64.patch` is selected automatically when `Engine/Build/Build.version` reports 5.9
 (tested on the `5.9.0-preview-1` tag). Differences handled by the CLI for 5.9:
 
-- **Windows SDK 10.0.26100** is used for the `xwin` sysroot when a 5.9 engine is detected (5.8 keeps 10.0.22621).
-  Override with `UE_WIN64_SDK_VERSION`. The sysroot is shared: if you switch SDK, delete it so it is re-downloaded.
+- **Windows SDK 10.0.26100** is used for the `xwin` sysroot when a 5.9 engine is detected (5.8 keeps `10.0.22621`).
+  Both SDK versions can coexist side-by-side in the shared sysroot (`~/.local/share/ue-linux-win64/sysroot`). Override with `UE_WIN64_SDK_VERSION`.
 - Recent `xwin` releases need `--use-winsysroot-style`; the lowercase `include`/`lib` folders it creates are
   renamed to `Include`/`Lib` as UBT expects.
 - The **actual clang version** is detected (UE 5.9 source builds can use the system clang, e.g. 23.x) instead of
@@ -46,16 +46,16 @@ packaged from Linux, running under Wine and on a real Windows 11 PC.
 
 ## Quick Start
 
-### 1. Prepare your Unreal Engine 5.8 source build (one-time per engine version)
+### 1. Prepare your Unreal Engine 5.8 or 5.9 source build (one-time per engine version)
 
 ```bash
 ue-linux-win64 setup-engine /path/to/UnrealEngine
 ```
 
 This command will:
-1. Download and splat the MSVC 14.44 + Windows 11 SDK (`10.0.22621`) sysroot via `xwin` into `~/.local/share/ue-linux-win64/sysroot` with case-folding symlinks for Linux filesystems.
+1. Download and splat the MSVC 14.44 + Windows 11 SDK (`10.0.22621` for 5.8, `10.0.26100` for 5.9) sysroot via `xwin` into `~/.local/share/ue-linux-win64/sysroot` with case-folding symlinks for Linux filesystems.
 2. Install the hybrid ISPC wrapper (`Engine/Source/ThirdParty/Intel/ISPC/bin/Linux/ispc`) so `.ispc` SIMD modules compile for `Win64`.
-3. Apply `patches/ue5.8-linux-win64.patch` to the engine.
+3. Apply the matching `patches/ue5.<minor>-linux-win64.patch` to the engine.
 4. Rebuild `UnrealBuildTool`, cross-compile `BootstrapPackagedGame` (`Win64 Shipping`), and compile `WindowsTargetPlatform*` + `WindowsPlatformEditor` modules for `UnrealEditor` (`Linux Development`).
 
 ### 2. Configure an Unreal Project for Linux -> Win64
@@ -65,7 +65,6 @@ ue-linux-win64 setup-project /path/to/MyProject
 ```
 
 Adds `[/Script/WindowsTargetPlatform.WindowsTargetSettings]` to `Config/DefaultEngine.ini` with:
-- `Compiler=Clang`
 - `DefaultGraphicsRHI=DefaultGraphicsRHI_Vulkan`
 - `TargetedRHIs=SF_VULKAN_SM6` & `SF_VULKAN_SM5`
 

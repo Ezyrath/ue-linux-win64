@@ -7,9 +7,6 @@ PATCH_FILE="$REPO_ROOT/patches/ue5.8-linux-win64.patch"
 
 DEFAULT_SYSROOT="${UE_WIN64_SYSROOT:-$HOME/.local/share/ue-linux-win64/sysroot}"
 DEFAULT_XWIN_CACHE="${UE_WIN64_XWIN_CACHE:-$HOME/.local/share/ue-linux-win64/xwin-cache}"
-# Windows SDK used for the xwin sysroot. Empty = chosen from the engine version in setup_sysroot
-# (UE 5.9+ -> 10.0.26100, older -> 10.0.22621). Override with UE_WIN64_SDK_VERSION.
-WIN_SDK_VERSION="${UE_WIN64_SDK_VERSION:-}"
 INSTALL_INI="$HOME/.config/Epic/UnrealEngine/Install.ini"
 
 GREEN='\033[0;32m'
@@ -27,13 +24,13 @@ usage() {
     cat <<EOF
 Usage: $(basename "$0") <command> [options]
 
-Cross-compile and package Unreal Engine 5.8 projects from Linux to Windows (Win64).
+Cross-compile and package Unreal Engine 5.8 and 5.9 projects from Linux to Windows (Win64).
 
 Commands:
   setup-engine <engine_dir> [--sysroot <dir>] [--skip-build]
       1. Downloads & splats MSVC + Windows 11 SDK sysroot via xwin (cached)
       2. Configures case-folding symlinks & LLVM clang-cl / lld-link / llvm-rc
-      3. Applies the UE 5.8 Linux->Win64 patch (UBT + WindowsTargetPlatform + BootstrapPackagedGame)
+      3. Applies the UE 5.8 / 5.9 Linux->Win64 patch (UBT + WindowsTargetPlatform + BootstrapPackagedGame)
       4. Rebuilds UnrealBuildTool, BootstrapPackagedGame (Win64 Shipping), and WindowsTargetPlatform (Linux Editor)
 
   setup-project [project_dir_or_uproject]
@@ -51,8 +48,9 @@ Commands:
       Displays the status of the Win64 sysroot, LLVM tools, and Unreal Engine patch/binaries.
 
 Environment variables:
-  UE_WIN64_SYSROOT     Override sysroot path (default: ~/.local/share/ue-linux-win64/sysroot)
-  UE_WIN64_XWIN_CACHE  Override xwin download cache (default: ~/.local/share/ue-linux-win64/xwin-cache)
+  UE_WIN64_SYSROOT      Override sysroot path (default: ~/.local/share/ue-linux-win64/sysroot)
+  UE_WIN64_XWIN_CACHE   Override xwin download cache (default: ~/.local/share/ue-linux-win64/xwin-cache)
+  UE_WIN64_SDK_VERSION  Override Windows SDK version (default: 10.0.22621 for UE 5.8, 10.0.26100 for UE 5.9+)
 EOF
 }
 
@@ -166,18 +164,19 @@ find_working_lld_link() {
 setup_sysroot() {
     local sysroot_dir="$1"
     local engine_dir="${2:-}"
+    local win_sdk_ver="${UE_WIN64_SDK_VERSION:-}"
 
-    if [[ -z "$WIN_SDK_VERSION" ]]; then
+    if [[ -z "$win_sdk_ver" ]]; then
         local ue_ver="" ue_minor=0
         [[ -n "$engine_dir" ]] && ue_ver=$(detect_engine_version "$engine_dir" 2>/dev/null || true)
         if [[ "$ue_ver" =~ ^5\.([0-9]+) ]]; then ue_minor="${BASH_REMATCH[1]}"; fi
-        if (( ue_minor >= 9 )); then WIN_SDK_VERSION="10.0.26100"; else WIN_SDK_VERSION="10.0.22621"; fi
+        if (( ue_minor >= 9 )); then win_sdk_ver="10.0.26100"; else win_sdk_ver="10.0.22621"; fi
     fi
-    log_info "Windows SDK version for the sysroot: $WIN_SDK_VERSION"
+    log_info "Windows SDK version for the sysroot: $win_sdk_ver"
 
     mkdir -p "$sysroot_dir" "$DEFAULT_XWIN_CACHE"
 
-    if [[ ! -d "$sysroot_dir/Windows Kits/10/Include" ]]; then
+    if [[ ! -d "$sysroot_dir/Windows Kits/10/Include/$win_sdk_ver" && ! -d "$sysroot_dir/Windows Kits/10/include/$win_sdk_ver" ]]; then
         local xwin_bin=""
         if command -v xwin >/dev/null 2>&1; then
             xwin_bin="$(readlink -f "$(command -v xwin)")"
@@ -191,10 +190,29 @@ setup_sysroot() {
             log_error "Run inside 'nix develop' or install xwin (cargo install xwin)."
             exit 1
         fi
-        log_info "Downloading and splatting MSVC + Windows 11 SDK sysroot into $sysroot_dir..."
-        "$xwin_bin" --accept-license --cache-dir "$DEFAULT_XWIN_CACHE" --arch x86_64 --sdk-version "${WIN_SDK_VERSION}" splat --use-winsysroot-style --preserve-ms-arch-notation --include-debug-libs --output "$sysroot_dir"
+        if [[ ! -d "$sysroot_dir/Windows Kits/10/Include" && ! -d "$sysroot_dir/Windows Kits/10/include" ]]; then
+            log_info "Downloading and splatting MSVC + Windows 11 SDK ($win_sdk_ver) sysroot into $sysroot_dir..."
+            "$xwin_bin" --accept-license --cache-dir "$DEFAULT_XWIN_CACHE" --arch x86_64 --sdk-version "$win_sdk_ver" splat --use-winsysroot-style --preserve-ms-arch-notation --include-debug-libs --output "$sysroot_dir"
+        else
+            log_info "Adding Windows 11 SDK ($win_sdk_ver) into existing sysroot at $sysroot_dir..."
+            local tmp_splat
+            tmp_splat="$(mktemp -d "${sysroot_dir}.splat.XXXXXX")"
+            "$xwin_bin" --accept-license --cache-dir "$DEFAULT_XWIN_CACHE" --arch x86_64 --sdk-version "$win_sdk_ver" splat --use-winsysroot-style --preserve-ms-arch-notation --include-debug-libs --output "$tmp_splat"
+            mkdir -p "$sysroot_dir/Windows Kits/10/Include" "$sysroot_dir/Windows Kits/10/Lib"
+            for src_inc in "$tmp_splat/Windows Kits/10/Include/$win_sdk_ver" "$tmp_splat/Windows Kits/10/include/$win_sdk_ver"; do
+                [[ -d "$src_inc" ]] && mv "$src_inc" "$sysroot_dir/Windows Kits/10/Include/$win_sdk_ver" && break
+            done
+            for src_lib in "$tmp_splat/Windows Kits/10/Lib/$win_sdk_ver" "$tmp_splat/Windows Kits/10/lib/$win_sdk_ver"; do
+                [[ -d "$src_lib" ]] && mv "$src_lib" "$sysroot_dir/Windows Kits/10/Lib/$win_sdk_ver" && break
+            done
+            if [[ ! -d "$sysroot_dir/VC/Tools/MSVC" && -d "$tmp_splat/VC" ]]; then
+                rm -rf "$sysroot_dir/VC"
+                mv "$tmp_splat/VC" "$sysroot_dir/VC"
+            fi
+            rm -rf "$tmp_splat"
+        fi
     else
-        log_info "Existing xwin sysroot detected at $sysroot_dir."
+        log_info "Existing xwin sysroot with Windows SDK $win_sdk_ver detected at $sysroot_dir."
     fi
 
     # 1. Ensure MSVC directory has a non-banned 3-component version (14.44.35211)
@@ -301,10 +319,16 @@ setup_sysroot() {
     if [[ -n "$bundled_gnu" ]]; then
         ln -sfn "$clang_bin" "$bundled_gnu/bin/clang-cl.exe"
         ln -sfn "$lld_link_bin" "$bundled_gnu/bin/lld-link.exe"
-        if [[ -d "$bundled_gnu/lib/clang/20" ]]; then
-            mkdir -p "$bundled_gnu/lib/clang/20/lib"
-            ln -sfn "$msvc_dir/lib/x64" "$bundled_gnu/lib/clang/20/lib/windows"
-            ln -sfn "$bundled_gnu/lib/clang/20/include" "$llvm_dir/lib/clang/$clang_major/include"
+        local bundled_clang_dir=""
+        for d in "$bundled_gnu"/lib/clang/*; do
+            [[ -d "$d" ]] && bundled_clang_dir="$d" && break
+        done
+        if [[ -n "$bundled_clang_dir" ]]; then
+            mkdir -p "$bundled_clang_dir/lib"
+            ln -sfn "$msvc_dir/lib/x64" "$bundled_clang_dir/lib/windows"
+            if [[ ! -e "$llvm_dir/lib/clang/$clang_major/include" && -d "$bundled_clang_dir/include" ]]; then
+                ln -sfn "$bundled_clang_dir/include" "$llvm_dir/lib/clang/$clang_major/include"
+            fi
         fi
     fi
 
@@ -320,22 +344,22 @@ setup_sysroot() {
         fi
         [[ -e "$kits_dir/$lower" ]] || ln -sfn "$d" "$kits_dir/$lower"
     done
-    if [[ -d "$kits_dir/Include/${WIN_SDK_VERSION}" && ! -e "$kits_dir/Include/${WIN_SDK_VERSION}.0" ]]; then
-        ln -sfn ${WIN_SDK_VERSION} "$kits_dir/Include/${WIN_SDK_VERSION}.0"
+    if [[ -d "$kits_dir/Include/$win_sdk_ver" && ! -e "$kits_dir/Include/${win_sdk_ver}.0" ]]; then
+        ln -sfn "$win_sdk_ver" "$kits_dir/Include/${win_sdk_ver}.0"
     fi
-    if [[ -d "$kits_dir/Lib/${WIN_SDK_VERSION}" && ! -e "$kits_dir/Lib/${WIN_SDK_VERSION}.0" ]]; then
-        ln -sfn ${WIN_SDK_VERSION} "$kits_dir/Lib/${WIN_SDK_VERSION}.0"
+    if [[ -d "$kits_dir/Lib/$win_sdk_ver" && ! -e "$kits_dir/Lib/${win_sdk_ver}.0" ]]; then
+        ln -sfn "$win_sdk_ver" "$kits_dir/Lib/${win_sdk_ver}.0"
     fi
 
-    mkdir -p "$kits_dir/bin/${WIN_SDK_VERSION}.0/x64" "$kits_dir/bin/${WIN_SDK_VERSION}/x64"
-    for rc_dir in "$kits_dir/bin/${WIN_SDK_VERSION}.0/x64" "$kits_dir/bin/${WIN_SDK_VERSION}/x64"; do
+    mkdir -p "$kits_dir/bin/${win_sdk_ver}.0/x64" "$kits_dir/bin/$win_sdk_ver/x64"
+    for rc_dir in "$kits_dir/bin/${win_sdk_ver}.0/x64" "$kits_dir/bin/$win_sdk_ver/x64"; do
         ln -sfn "$llvm_rc_bin" "$rc_dir/rc.exe"
         ln -sfn "$llvm_mt_bin" "$rc_dir/mt.exe"
         ln -sfn "$clang_bin" "$rc_dir/clang-cl"
     done
 
     log_info "Creating case-insensitive .lib and .h symlinks in Windows SDK..."
-    for libdir in "$kits_dir/Lib/${WIN_SDK_VERSION}/um/x64" "$kits_dir/Lib/${WIN_SDK_VERSION}/ucrt/x64" "$msvc_dir/lib/x64"; do
+    for libdir in "$kits_dir/Lib/$win_sdk_ver/um/x64" "$kits_dir/Lib/$win_sdk_ver/ucrt/x64" "$msvc_dir/lib/x64"; do
         [[ -d "$libdir" ]] || continue
         pushd "$libdir" >/dev/null
         for f in *.lib *.Lib *.LIB; do
@@ -355,7 +379,7 @@ setup_sysroot() {
         popd >/dev/null
     done
 
-    for incdir in "$kits_dir/Include/${WIN_SDK_VERSION}/um" "$kits_dir/Include/${WIN_SDK_VERSION}/shared" "$kits_dir/Include/${WIN_SDK_VERSION}/ucrt" "$kits_dir/Include/${WIN_SDK_VERSION}/winrt" "$msvc_dir/include"; do
+    for incdir in "$kits_dir/Include/$win_sdk_ver/um" "$kits_dir/Include/$win_sdk_ver/shared" "$kits_dir/Include/$win_sdk_ver/ucrt" "$kits_dir/Include/$win_sdk_ver/winrt" "$msvc_dir/include"; do
         [[ -d "$incdir" ]] || continue
         pushd "$incdir" >/dev/null
         for f in *.h *.H; do
@@ -667,12 +691,12 @@ cmd_setup_project() {
 r.PSOPrecache.GlobalShaders=0
 EOF
             fi
-            log_ok "Project $(basename "$uproject") is already configured for Linux->Win64 (Vulkan + Clang)."
+            log_ok "Project $(basename "$uproject") is already configured for Linux->Win64 (Vulkan SM5/SM6)."
             return 0
         fi
     fi
 
-    log_info "Configuring $engine_ini for Linux->Win64 cross-compilation (Clang + Vulkan SM5/SM6)..."
+    log_info "Configuring $engine_ini for Linux->Win64 cross-compilation (Vulkan SM5/SM6)..."
     cat >> "$engine_ini" << 'EOF'
 
 [/Script/WindowsTargetPlatform.WindowsTargetSettings]

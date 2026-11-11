@@ -1,5 +1,5 @@
 {
-  description = "Cross-compile and package Unreal Engine 5.8 projects from Linux to Windows (Win64)";
+  description = "Cross-compile and package Unreal Engine 5.8 and 5.9 projects from Linux to Windows (Win64)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
